@@ -1,34 +1,33 @@
 using System.Windows;
-using System.Windows.Media.Imaging;
+using System.Windows.Media;
 
 namespace PianoFlow.Rendering;
 
 /// <summary>
-/// Simple particle burst effect system.
-/// Particles spawn on note hits, affected by gravity, with fade-out.
+/// WPF-accelerated particle system. Draws particles as small rectangles via DrawingContext.
+/// No pixel manipulation needed.
 /// </summary>
 public class ParticleSystem
 {
     private readonly List<Particle> _particles = new();
-    private Random _random = new();
+    private readonly Random _random = new();
 
     public int MaxParticles { get; set; } = 500;
     public int ParticlesPerBurst { get; set; } = 12;
-    public double ParticleLifetime { get; set; } = 0.8; // seconds
-    public double Gravity { get; set; } = 400; // pixels/s²
+    public double ParticleLifetime { get; set; } = 0.8;
+    public double Gravity { get; set; } = 400;
 
     public struct Particle
     {
         public double X, Y;
         public double VX, VY;
-        public double Life;      // remaining life in seconds
+        public double Life;
         public double MaxLife;
-        public uint Color;
+        public Color Color;
         public int Size;
     }
 
-    /// <summary>Emit a burst of particles at the given position.</summary>
-    public void Emit(double x, double y, uint color)
+    public void Emit(double x, double y, Color color)
     {
         for (int i = 0; i < ParticlesPerBurst && _particles.Count < MaxParticles; i++)
         {
@@ -40,7 +39,7 @@ public class ParticleSystem
                 X = x,
                 Y = y,
                 VX = Math.Cos(angle) * speed,
-                VY = Math.Sin(angle) * speed - 100, // initial upward bias
+                VY = Math.Sin(angle) * speed - 100,
                 Life = ParticleLifetime * (0.5 + _random.NextDouble() * 0.5),
                 MaxLife = ParticleLifetime,
                 Color = color,
@@ -49,7 +48,6 @@ public class ParticleSystem
         }
     }
 
-    /// <summary>Update all particles. Call once per frame.</summary>
     public void Update(double dt)
     {
         for (int i = _particles.Count - 1; i >= 0; i--)
@@ -67,35 +65,20 @@ public class ParticleSystem
         }
     }
 
-    /// <summary>Render all particles into the buffer.</summary>
-    public unsafe void Render(uint* buffer, int stride, int width, int height)
+    /// <summary>Draw all particles via WPF DrawingContext.</summary>
+    public void Draw(DrawingContext dc)
     {
         foreach (var p in _particles)
         {
             float lifeRatio = (float)(p.Life / p.MaxLife);
             byte alpha = (byte)(lifeRatio * 255);
-            uint color = (p.Color & 0x00FFFFFF) | ((uint)alpha << 24);
+            var brush = new SolidColorBrush(Color.FromArgb(alpha, p.Color.R, p.Color.G, p.Color.B));
+            brush.Freeze();
 
-            int size = p.Size;
-            int px = (int)p.X;
-            int py = (int)p.Y;
-
-            for (int dy = 0; dy < size; dy++)
-            {
-                for (int dx = 0; dx < size; dx++)
-                {
-                    int x = px + dx;
-                    int y = py + dy;
-                    if (x >= 0 && x < width && y >= 0 && y < height)
-                    {
-                        buffer[y * stride + x] = color;
-                    }
-                }
-            }
+            dc.DrawRectangle(brush, null, new Rect(p.X, p.Y, p.Size, p.Size));
         }
     }
 
     public int Count => _particles.Count;
-
     public void Clear() => _particles.Clear();
 }

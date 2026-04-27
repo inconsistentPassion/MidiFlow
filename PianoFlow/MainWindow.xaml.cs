@@ -3,14 +3,16 @@ using System.Windows.Input;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using PianoFlow.Rendering;
 using PianoFlow.ViewModels;
 
 namespace PianoFlow;
 
 public partial class MainWindow : Window
 {
-    private readonly MainViewModel _vm;
+    private MainViewModel _vm = null!;
     private readonly DispatcherTimer _renderTimer;
+    private readonly PianoFlowVisual _pianoVisual;
     private Storyboard? _fadeIn;
     private Storyboard? _fadeOut;
     private Storyboard? _settingsIn;
@@ -23,7 +25,12 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
-        _vm = new MainViewModel();
+        // Create the visual (GPU-accelerated renderer)
+        _pianoVisual = new PianoFlowVisual();
+        RootGrid.Children.Insert(0, _pianoVisual);
+
+        // Create VM with the visual
+        _vm = new MainViewModel(_pianoVisual);
         DataContext = _vm;
 
         _vm.RenderFrameReady += OnRenderFrameReady;
@@ -83,13 +90,8 @@ public partial class MainWindow : Window
         SetupAnimations();
         RefreshRendererLayout();
         _layoutReady = true;
-
-        // Start rendering
         _renderTimer.Start();
-
-        // Populate MIDI devices
         RefreshMidiDevices();
-
         _uiVisible = false;
     }
 
@@ -105,15 +107,17 @@ public partial class MainWindow : Window
         int pianoH = (int)(h * _vm.PianoHeightPercent / 100.0);
         if (pianoH < 20) pianoH = (int)(h * 0.11);
         _vm.PianoHeight = pianoH;
+        _pianoVisual.PianoHeight = pianoH;
 
-        _vm.NoteRenderer.UpdateLayout(w, h, _vm.PianoHeight);
-        RenderImage.Source = _vm.NoteRenderer.Bitmap;
+        // Size the visual to fill the window
+        _pianoVisual.Width = w;
+        _pianoVisual.Height = h;
+        _pianoVisual.UpdateLayout(w, h);
     }
 
     private void OnRenderFrameReady()
     {
-        if (_vm.Bitmap == null) return;
-        RenderImage.Source = _vm.Bitmap;
+        WelcomeOverlay.Visibility = _vm.FilePath != null ? Visibility.Collapsed : Visibility.Visible;
 
         PlayStateText.Text = _vm.IsPlaying
             ? (_vm.IsPaused ? "⏸ Paused" : "▶ Playing")
@@ -121,15 +125,11 @@ public partial class MainWindow : Window
         TimeText.Text = _vm.TimeDisplay;
         MidiDeviceText.Text = _vm.MidiDeviceName != null ? $"🎹 {_vm.MidiDeviceName}" : "";
         StatusText.Text = _vm.StatusText ?? "";
-
-        WelcomeOverlay.Visibility = _vm.FilePath != null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    // --- F1 toggle for UI ---
     private void ToggleUI()
     {
         _uiVisible = !_uiVisible;
-
         if (_uiVisible)
         {
             StatusBar.Visibility = Visibility.Visible;
@@ -139,11 +139,7 @@ public partial class MainWindow : Window
         {
             _fadeOut?.Begin();
             var d = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-            d.Tick += (s, ev) =>
-            {
-                if (!_uiVisible) StatusBar.Visibility = Visibility.Collapsed;
-                d.Stop();
-            };
+            d.Tick += (s, ev) => { if (!_uiVisible) StatusBar.Visibility = Visibility.Collapsed; d.Stop(); };
             d.Start();
         }
     }
@@ -151,7 +147,6 @@ public partial class MainWindow : Window
     private void ToggleSettings()
     {
         _settingsVisible = !_settingsVisible;
-
         if (_settingsVisible)
         {
             SettingsPanel.Visibility = Visibility.Visible;
@@ -161,11 +156,7 @@ public partial class MainWindow : Window
         {
             _settingsOut?.Begin();
             var d = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-            d.Tick += (s, ev) =>
-            {
-                if (!_settingsVisible) SettingsPanel.Visibility = Visibility.Collapsed;
-                d.Stop();
-            };
+            d.Tick += (s, ev) => { if (!_settingsVisible) SettingsPanel.Visibility = Visibility.Collapsed; d.Stop(); };
             d.Start();
         }
     }
@@ -175,14 +166,12 @@ public partial class MainWindow : Window
         MidiDeviceCombo.Items.Clear();
         var devices = _vm.GetMidiDevices();
         foreach (var d in devices)
-        {
             MidiDeviceCombo.Items.Add(d.Name);
-        }
         if (MidiDeviceCombo.Items.Count > 0)
             MidiDeviceCombo.SelectedIndex = 0;
     }
 
-    // --- Keyboard Input ---
+    // --- Keyboard ---
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
         switch (e.Key)
@@ -191,52 +180,42 @@ public partial class MainWindow : Window
                 ToggleUI();
                 e.Handled = true;
                 break;
-
             case Key.Space:
                 _vm.TogglePause();
                 e.Handled = true;
                 break;
-
             case Key.R:
                 _vm.Restart();
                 e.Handled = true;
                 break;
-
             case Key.F:
                 _vm.FlipDirection();
                 DirFalling.IsChecked = _vm.Falling;
                 DirRising.IsChecked = !_vm.Falling;
                 e.Handled = true;
                 break;
-
             case Key.Up:
                 _vm.NoteSpeed += 50;
                 SpeedSlider.Value = _vm.NoteSpeed;
                 e.Handled = true;
                 break;
-
             case Key.Down:
                 _vm.NoteSpeed -= 50;
                 SpeedSlider.Value = _vm.NoteSpeed;
                 e.Handled = true;
                 break;
-
             case Key.E:
                 OnExport();
                 e.Handled = true;
                 break;
-
             case Key.O:
                 OnOpenFile();
                 e.Handled = true;
                 break;
-
             case Key.Q:
             case Key.Escape:
-                if (_settingsVisible)
-                    ToggleSettings();
-                else
-                    Close();
+                if (_settingsVisible) ToggleSettings();
+                else Close();
                 e.Handled = true;
                 break;
         }
@@ -249,7 +228,6 @@ public partial class MainWindow : Window
             Filter = "MIDI Files (*.mid;*.midi)|*.mid;*.midi|All Files (*.*)|*.*",
             Title = "Open MIDI File"
         };
-
         if (dlg.ShowDialog() == true)
             LoadMidiFile(dlg.FileName);
     }
@@ -267,8 +245,7 @@ public partial class MainWindow : Window
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop)
-            ? DragDropEffects.Copy
-            : DragDropEffects.None;
+            ? DragDropEffects.Copy : DragDropEffects.None;
         e.Handled = true;
     }
 
@@ -277,12 +254,11 @@ public partial class MainWindow : Window
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
         {
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-            if (files.Length > 0)
-                LoadMidiFile(files[0]);
+            if (files.Length > 0) LoadMidiFile(files[0]);
         }
     }
 
-    // --- Button handlers ---
+    // --- UI Handlers ---
     private void SettingsButton_Click(object sender, RoutedEventArgs e) => ToggleSettings();
     private void CloseSettingsButton_Click(object sender, RoutedEventArgs e) => ToggleSettings();
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
@@ -290,8 +266,7 @@ public partial class MainWindow : Window
     private void MidiDeviceCombo_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         int idx = MidiDeviceCombo.SelectedIndex;
-        if (idx >= 0)
-            _vm.ConnectMidiDevice(idx);
+        if (idx >= 0) _vm.ConnectMidiDevice(idx);
     }
 
     private void SpeedSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
@@ -335,7 +310,6 @@ public partial class MainWindow : Window
             Title = "Export Video",
             FileName = System.IO.Path.GetFileNameWithoutExtension(_vm.FilePath ?? "output") + ".mp4"
         };
-
         if (dlg.ShowDialog() == true)
         {
             _vm.StartExport(dlg.FileName);
@@ -352,7 +326,6 @@ public partial class MainWindow : Window
     protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
     {
         base.OnRenderSizeChanged(sizeInfo);
-        if (IsLoaded)
-            RefreshRendererLayout();
+        if (IsLoaded) RefreshRendererLayout();
     }
 }

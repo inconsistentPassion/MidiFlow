@@ -1,34 +1,23 @@
 using System.Diagnostics;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace PianoFlow.Export;
 
 /// <summary>
 /// Exports rendered frames to MP4 via FFmpeg subprocess pipe.
-/// Captures frames as raw RGB24, encodes with libx264.
+/// Accepts RenderTargetBitmap (from WPF visual rendering).
 /// </summary>
 public class VideoExporter : IDisposable
 {
     private Process? _ffmpeg;
     private bool _isExporting;
-    private byte[]? _rgbBuffer;
 
     public bool IsExporting => _isExporting;
 
-
-    /// <summary>Export completed (outputPath).</summary>
     public event Action<string>? Completed;
-
-    /// <summary>Export failed (errorMessage).</summary>
     public event Action<string>? Failed;
 
-    /// <summary>Start exporting video.</summary>
-    /// <param name="outputPath">Output MP4 file path.</param>
-    /// <param name="width">Frame width in pixels.</param>
-    /// <param name="height">Frame height in pixels.</param>
-    /// <param name="fps">Target frames per second.</param>
-    /// <param name="crf">Quality (0-51, lower = better, default 18).</param>
-    /// <param name="ffmpegPath">Path to ffmpeg executable.</param>
     public void StartExport(string outputPath, int width, int height,
         int fps = 30, int crf = 18, string ffmpegPath = "ffmpeg")
     {
@@ -58,7 +47,6 @@ public class VideoExporter : IDisposable
                 Failed?.Invoke("Failed to start FFmpeg process.");
                 return;
             }
-            _rgbBuffer = new byte[width * height * 3];
             _isExporting = true;
         }
         catch (Exception ex)
@@ -67,46 +55,22 @@ public class VideoExporter : IDisposable
         }
     }
 
-    /// <summary>Write a frame to the FFmpeg pipe.
-    /// The bitmap must be in BGRA32 format.</summary>
-    public unsafe void WriteFrame(WriteableBitmap bitmap)
+    /// <summary>Write a frame. Accepts any BitmapSource (RenderTargetBitmap, etc).</summary>
+    public void WriteFrame(BitmapSource bitmap)
     {
-        if (_ffmpeg == null || !_isExporting || _ffmpeg.StandardInput.BaseStream == null)
-            return;
+        if (_ffmpeg == null || !_isExporting) return;
 
         try
         {
-            bitmap.Lock();
+            int w = bitmap.PixelWidth;
+            int h = bitmap.PixelHeight;
 
-            int width = bitmap.PixelWidth;
-            int height = bitmap.PixelHeight;
-            int stride = bitmap.BackBufferStride;
-            var src = (byte*)bitmap.BackBuffer;
+            // Convert to RGB24
+            var converted = new FormatConvertedBitmap(bitmap, PixelFormats.Rgb24, null, 0);
+            byte[] rgb = new byte[w * h * 3];
+            converted.CopyPixels(rgb, w * 3, 0);
 
-            // Convert BGRA to RGB24
-            int bufferSize = width * height * 3;
-            if (_rgbBuffer == null || _rgbBuffer.Length != bufferSize)
-            {
-                _rgbBuffer = new byte[bufferSize];
-            }
-
-            int idx = 0;
-            for (int y = 0; y < height; y++)
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    int offset = y * stride + x * 4;
-                    _rgbBuffer[idx + 2] = src[offset];     // B -> R
-                    _rgbBuffer[idx + 1] = src[offset + 1]; // G -> G
-                    _rgbBuffer[idx] = src[offset + 2];     // R -> B
-                    // skip alpha
-                    idx += 3;
-                }
-            }
-
-            bitmap.Unlock();
-
-            _ffmpeg.StandardInput.BaseStream.Write(_rgbBuffer, 0, _rgbBuffer.Length);
+            _ffmpeg.StandardInput.BaseStream.Write(rgb, 0, rgb.Length);
         }
         catch (Exception ex)
         {
@@ -114,7 +78,6 @@ public class VideoExporter : IDisposable
         }
     }
 
-    /// <summary>Finish export and close FFmpeg.</summary>
     public void FinishExport(int totalFrames)
     {
         if (_ffmpeg == null) return;
@@ -137,24 +100,16 @@ public class VideoExporter : IDisposable
         }
     }
 
-    /// <summary>Cancel the current export.</summary>
     public void Cancel()
     {
         if (_ffmpeg != null)
         {
-            try
-            {
-                _ffmpeg.Kill();
-            }
-            catch { }
+            try { _ffmpeg.Kill(); } catch { }
             _isExporting = false;
             _ffmpeg.Dispose();
             _ffmpeg = null;
         }
     }
 
-    public void Dispose()
-    {
-        Cancel();
-    }
+    public void Dispose() => Cancel();
 }

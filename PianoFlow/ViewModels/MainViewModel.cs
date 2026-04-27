@@ -1,7 +1,6 @@
 using System.ComponentModel;
-using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Windows.Threading;
 using PianoFlow.Export;
 using PianoFlow.Models;
 using PianoFlow.Rendering;
@@ -16,7 +15,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     // --- State ---
     private MidiFileData? _midiData;
     private readonly MidiDeviceInput _midiDevice = new();
-    private readonly NoteRenderer _noteRenderer = new();
+    private readonly PianoFlowVisual _pianoVisual;
     private readonly ParticleSystem _particles = new();
     private readonly VideoExporter _exporter = new();
 
@@ -24,12 +23,12 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private double _currentTime;
     private bool _isPlaying;
     private bool _isPaused;
-    private double _noteSpeed = 300; // pixels per second
-    private bool _falling = true; // true = falling (top→bottom), false = rising
+    private double _noteSpeed = 300;
+    private bool _falling = true;
 
     // --- Piano state ---
-    private bool[] _keyActive = new bool[NoteRenderer.NoteCount];
-    private double[] _keyFadeTime = new double[NoteRenderer.NoteCount];
+    private bool[] _keyActive = new bool[PianoFlowVisual.NoteCount];
+    private double[] _keyFadeTime = new double[PianoFlowVisual.NoteCount];
 
     // --- Live notes ---
     private readonly List<MidiNote> _liveNotes = new();
@@ -54,8 +53,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     public event Action<string>? ShowMessage;
 
     // --- Properties ---
-    public WriteableBitmap? Bitmap => _noteRenderer.Bitmap;
-    public NoteRenderer NoteRenderer => _noteRenderer;
+    public PianoFlowVisual PianoVisual => _pianoVisual;
 
     public bool IsPlaying
     {
@@ -145,8 +143,9 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     }
 
     // --- Constructor ---
-    public MainViewModel()
+    public MainViewModel(PianoFlowVisual pianoVisual)
     {
+        _pianoVisual = pianoVisual;
         _midiDevice.NoteOn += OnLiveNoteOn;
         _midiDevice.NoteOff += OnLiveNoteOff;
     }
@@ -163,7 +162,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             IsPaused = false;
             CurrentTime = 0;
 
-            // Reset piano state
             Array.Clear(_keyActive);
             Array.Clear(_keyFadeTime);
             _liveNotes.Clear();
@@ -201,18 +199,9 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
 
     public void TogglePause()
     {
-        if (!IsPlaying)
-        {
-            Play();
-        }
-        else if (IsPaused)
-        {
-            Play();
-        }
-        else
-        {
-            Pause();
-        }
+        if (!IsPlaying) Play();
+        else if (IsPaused) Play();
+        else Pause();
     }
 
     public void Restart()
@@ -265,7 +254,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         {
             CurrentTime = (DateTime.Now - _playbackStartTime).TotalSeconds;
 
-            // Check if playback ended
             if (_midiData != null && CurrentTime >= _midiData.TotalSeconds + 1)
             {
                 IsPlaying = false;
@@ -274,51 +262,34 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // Update live note key states
+        // Update key states
         var allNotes = GetAllVisibleNotes();
-
-        // Reset key states
         Array.Clear(_keyActive);
         foreach (var note in allNotes)
         {
-            int idx = note.Note - NoteRenderer.FirstNote;
+            int idx = note.Note - PianoFlowVisual.FirstNote;
             if (idx >= 0 && idx < _keyActive.Length)
             {
                 if (note.OnTime <= CurrentTime && note.OffTime > CurrentTime)
-                {
                     _keyActive[idx] = true;
-                }
             }
         }
 
         // Update particles
         _particles.Update(1.0 / _fps);
 
-        // Render
-        _noteRenderer.Render(allNotes, CurrentTime, Falling, _noteSpeed,
-            null, _keyActive, _keyFadeTime);
-
-        // Render particles on top (unsafe block needed)
-        var bitmap = _noteRenderer.Bitmap;
-        if (bitmap != null)
-        {
-            bitmap.Lock();
-            unsafe
-            {
-                var buffer = (uint*)bitmap.BackBuffer;
-                int stride = bitmap.BackBufferStride / 4;
-                _particles.Render(buffer, stride, _width, _height);
-            }
-            bitmap.AddDirtyRect(new System.Windows.Int32Rect(0, 0, _width, _height));
-            bitmap.Unlock();
-        }
+        // Render via WPF DrawingVisual (GPU accelerated)
+        _pianoVisual.Render(allNotes, CurrentTime, Falling, _noteSpeed, _keyActive);
 
         RenderFrameReady?.Invoke();
 
         // Export frame if exporting
-        if (IsExporting && bitmap != null)
+        if (IsExporting)
         {
-            _exporter.WriteFrame(bitmap);
+            // For export, render to a RenderTargetBitmap
+            var rtb = new RenderTargetBitmap(_width, _height, 96, 96, PixelFormats.Pbgra32);
+            rtb.Render(_pianoVisual);
+            _exporter.WriteFrame(rtb);
             _exportFrame++;
             if (_exportFrame >= _exportTotalFrames)
             {
@@ -334,7 +305,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         if (_midiData == null) return _liveNotes;
         if (_liveNotes.Count == 0) return _midiData.Notes;
 
-        // Merge file notes with live notes
         var merged = new List<MidiNote>(_midiData.Notes);
         merged.AddRange(_liveNotes);
         merged.Sort((a, b) => a.OnTime.CompareTo(b.OnTime));
@@ -350,28 +320,29 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             Velocity = velocity,
             Channel = channel,
             OnTime = CurrentTime,
-            OffTime = CurrentTime + 0.5, // default duration, will be updated on NoteOff
+            OffTime = CurrentTime + 0.5,
             IsLive = true,
         };
         _liveNotes.Add(midiNote);
 
-        // Activate key
-        int idx = note - NoteRenderer.FirstNote;
+        int idx = note - PianoFlowVisual.FirstNote;
         if (idx >= 0 && idx < _keyActive.Length)
         {
             _keyActive[idx] = true;
             _keyFadeTime[idx] = CurrentTime;
         }
 
+        // Record hit for flash effect
+        _pianoVisual.RecordHit(note);
+
         // Spawn particles
-        var color = GetChannelColor(channel);
-        double keyX = GetKeyXPosition(note);
-        _particles.Emit(keyX, _height - _pianoHeight, color);
+        var color = PianoFlowVisual.ChannelColors[channel % 16];
+        double keyX = _pianoVisual.GetKeyCenterX(note);
+        _particles.Emit(keyX, _pianoVisual.PianoTopY, color);
     }
 
     private void OnLiveNoteOff(int note, int channel)
     {
-        // Find the most recent live note with this note/channel and set its off time
         for (int i = _liveNotes.Count - 1; i >= 0; i--)
         {
             if (_liveNotes[i].Note == note && _liveNotes[i].Channel == channel && _liveNotes[i].IsLive)
@@ -383,40 +354,9 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        int idx = note - NoteRenderer.FirstNote;
+        int idx = note - PianoFlowVisual.FirstNote;
         if (idx >= 0 && idx < _keyActive.Length)
-        {
             _keyActive[idx] = false;
-        }
-    }
-
-    private uint GetChannelColor(int channel)
-    {
-        uint[] colors = {
-            0xFF4FC3F7, 0xFFFF7043, 0xFF66BB6A, 0xFFFFCA28,
-            0xFFAB47BC, 0xFFEF5350, 0xFF26C6DA, 0xFF8D6E63,
-            0xFF78909C, 0xFFD4E157, 0xFFFF8A65, 0xFFAED581,
-            0xFF7986CB, 0xFFF06292, 0xFF4DB6AC, 0xFFFFD54F,
-        };
-        return colors[channel % 16];
-    }
-
-    private double GetKeyXPosition(int note)
-    {
-        // Approximate: count white keys before this note
-        bool[] isBlack = { false, true, false, true, false, false, true, false, true, false, true, false };
-        int whiteCount = 0;
-        for (int n = NoteRenderer.FirstNote; n < note; n++)
-        {
-            if (!isBlack[n % 12]) whiteCount++;
-        }
-        int totalWhite = 0;
-        for (int n = NoteRenderer.FirstNote; n <= NoteRenderer.LastNote; n++)
-        {
-            if (!isBlack[n % 12]) totalWhite++;
-        }
-        double whiteWidth = _width / (double)totalWhite;
-        return whiteCount * whiteWidth + whiteWidth / 2;
     }
 
     // --- Video Export ---
@@ -451,14 +391,12 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         StatusText = "Export cancelled";
     }
 
-    // --- Cleanup ---
     public void Dispose()
     {
         _midiDevice.Dispose();
         _exporter.Dispose();
     }
 
-    // --- Helpers ---
     private static string FormatTime(double seconds)
     {
         var ts = TimeSpan.FromSeconds(Math.Max(0, seconds));
