@@ -1,0 +1,33 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- PianoFlow Color Palette -->
+    <Color x:Key="BackgroundColor">#FF0A0E1A</Color>
+    <Color x:Key="PianoSeparatorColor">#FF333366</Color>
+    <Color x:Key="WhiteKeyColor">#FFE0E0E0</Color>
+    <Color x:Key="BlackKeyColor">#FF1A1A2E</Color>
+    <Color x:Key="ActiveWhiteKeyColor">#FFFFFFFF</Color>
+    <Color x:Key="ActiveBlackKeyColor">#FF3A3A5E</Color>
+    <Color x:Key="StatusBarBackground">#CC0A0E1A</Color>
+    <Color x:Key="TextColor">#FFAAAAAA</Color>
+    <Color x:Key="DimTextColor">#FF555555</Color>
+
+    <!-- Channel Colors -->
+    <Color x:Key="Channel0">#FF4FC3F7</Color>
+    <Color x:Key="Channel1">#FFFF7043</Color>
+    <Color x:Key="Channel2">#FF66BB6A</Color>
+    <Color x:Key="Channel3">#FFFFCA28</Color>
+    <Color x:Key="Channel4">#FFAB47BC</Color>
+    <Color x:Key="Channel5">#FFEF5350</Color>
+    <Color x:Key="Channel6">#FF26C6DA</Color>
+    <Color x:Key="Channel7">#FF8D6E63</Color>
+    <Color x:Key="Channel8">#FF78909C</Color>
+    <Color x:Key="Channel9">#FFD4E157</Color>
+    <Color x:Key="Channel10">#FFFF8A65</Color>
+    <Color x:Key="Channel11">#FFAED581</Color>
+    <Color x:Key="Channel12">#FF7986CB</Color>
+    <Color x:Key="Channel13">#FFF06292</Color>
+    <Color x:Key="Channel14">#FF4DB6AC</Color>
+    <Color x:Key="Channel15">#FFFFD54F</Color>
+
+</ResourceDictionary>
