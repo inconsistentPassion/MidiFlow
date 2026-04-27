@@ -40,7 +40,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private bool _mergedDirty = true;
 
     // --- Audio sync state ---
-    private int _audioNoteIndex;  // cursor through sorted notes for audio scheduling
     private HashSet<(int ch, int note)> _activeAudioNotes = new();
 
     // --- Export ---
@@ -193,7 +192,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             Array.Clear(_keyActive);
             _liveNotes.Clear();
             _mergedDirty = true;
-            _audioNoteIndex = 0;
             _activeAudioNotes.Clear();
             _audio.AllNotesOff();
 
@@ -244,7 +242,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         _liveNotes.Clear();
         _mergedDirty = true;
         _particles.Clear();
-        _audioNoteIndex = 0;
         _activeAudioNotes.Clear();
         _audio.AllNotesOff();
         if (IsPlaying) Play();
@@ -331,50 +328,65 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
 
     /// <summary>
     /// Sync audio: fire NoteOn/NoteOff for notes between prevTime and currentTime.
-    /// Also turn off notes that have ended.
+    /// Uses binary search to find notes in the time range — robust against frame skips and seeks.
     /// </summary>
     private void SyncAudio(double prevTime, double currentTime)
     {
         if (_midiData == null) return;
         var notes = _midiData.Notes;
+        int count = notes.Count;
+        if (count == 0) return;
 
-        // Schedule new notes that started between prevTime and currentTime
-        while (_audioNoteIndex < notes.Count)
+        double windowStart = prevTime;
+        double windowEnd = currentTime;
+
+        // Binary search for first note with OnTime >= windowStart
+        int lo = 0, hi = count;
+        while (lo < hi)
         {
-            var note = notes[_audioNoteIndex];
-            if (note.OnTime > currentTime) break;
+            int mid = (lo + hi) / 2;
+            if (notes[mid].OnTime < windowStart) lo = mid + 1;
+            else hi = mid;
+        }
 
-            if (note.OnTime >= prevTime && note.OnTime <= currentTime)
+        // Play all notes that start in [windowStart, windowEnd]
+        for (int i = lo; i < count; i++)
+        {
+            var note = notes[i];
+            if (note.OnTime > windowEnd) break;  // sorted by OnTime, so we're done
+            if (note.OnTime >= windowStart && note.OnTime <= windowEnd)
             {
                 _audio.NoteOn(note.Channel, note.Note, note.Velocity);
                 _activeAudioNotes.Add((note.Channel, note.Note));
             }
-            _audioNoteIndex++;
         }
 
         // Turn off notes that have ended
-        var toRemove = new List<(int ch, int note)>();
-        foreach (var (ch, n) in _activeAudioNotes)
+        if (_activeAudioNotes.Count > 0)
         {
-            // Find the note to check its OffTime
-            // Use binary search or just scan recent notes
-            bool shouldOff = false;
-            for (int i = Math.Max(0, _audioNoteIndex - 200); i < _audioNoteIndex; i++)
+            var toRemove = new List<(int ch, int note)>();
+            foreach (var (ch, n) in _activeAudioNotes)
             {
-                if (notes[i].Channel == ch && notes[i].Note == n && notes[i].OffTime <= currentTime)
+                // Check if this note's OffTime has passed
+                // Scan from the start position backward/forward to find matching note
+                bool shouldOff = false;
+                for (int i = Math.Max(0, lo - 100); i < Math.Min(count, lo + 200); i++)
                 {
-                    shouldOff = true;
-                    break;
+                    if (notes[i].Channel == ch && notes[i].Note == n && notes[i].OffTime <= currentTime)
+                    {
+                        shouldOff = true;
+                        break;
+                    }
+                }
+                if (shouldOff)
+                {
+                    _audio.NoteOff(ch, n);
+                    toRemove.Add((ch, n));
                 }
             }
-            if (shouldOff)
-            {
-                _audio.NoteOff(ch, n);
-                toRemove.Add((ch, n));
-            }
+            foreach (var key in toRemove)
+                _activeAudioNotes.Remove(key);
         }
-        foreach (var key in toRemove)
-            _activeAudioNotes.Remove(key);
     }
 
     /// <summary>Get merged notes, reusing the pre-allocated list.</summary>
