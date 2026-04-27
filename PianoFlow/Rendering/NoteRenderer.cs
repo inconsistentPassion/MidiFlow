@@ -5,11 +5,13 @@ namespace PianoFlow.Rendering;
 
 /// <summary>
 /// GPU-accelerated piano + note renderer using WPF DrawingVisual.
+/// Visual effects: glow/bloom, note gradients, impact flash, background atmosphere, keyboard saber.
 /// Performance-optimized: pre-cached brushes, precomputed key positions, zero per-frame allocations.
 /// </summary>
 public class PianoFlowVisual : FrameworkElement
 {
-    private readonly DrawingVisual _visual = new();
+    private readonly DrawingVisual _glowVisual = new();  // bloom layer (behind)
+    private readonly DrawingVisual _visual = new();       // main layer
 
     // Key range: A0 (21) to C8 (108)
     public const int FirstNote = 21;
@@ -30,15 +32,30 @@ public class PianoFlowVisual : FrameworkElement
     // --- Pre-cached note brushes: [channel, alphaBucket] ---
     private const int AlphaBuckets = 16;
     private static readonly SolidColorBrush[][] NoteBrushCache;
+
+    // --- Glow brushes: [channel, alphaBucket] (larger, dimmer) ---
+    private static readonly SolidColorBrush[][] GlowBrushCache;
+
+    // --- Gradient brushes for notes (bright at hit edge) ---
+    private static readonly LinearGradientBrush[][] NoteGradientCache;
+
+    // --- Impact flash brushes ---
+    private static readonly SolidColorBrush[] ImpactFlashBrushes;  // expanding circle
     private static readonly SolidColorBrush[] HitFlashWhite;
     private static readonly SolidColorBrush[] HitFlashBlack;
 
-    // --- Piano key visual brushes (pre-frozen) ---
+    // --- Background atmosphere ---
+    private static readonly RadialGradientBrush AtmosphereBrush;
+
+    // --- Keyboard saber ---
+    private static readonly LinearGradientBrush SaberGradient;
+
+    // --- Piano key visual brushes ---
     private static readonly SolidColorBrush PianoKeyBorder;
-    private static readonly SolidColorBrush WhiteKeyTop;    // lighter top edge (3D effect)
-    private static readonly SolidColorBrush WhiteKeyBottom; // darker bottom edge
-    private static readonly SolidColorBrush BlackKeyTop;    // lighter top edge
-    private static readonly SolidColorBrush BlackKeySide;   // side edge shade
+    private static readonly SolidColorBrush WhiteKeyTop;
+    private static readonly SolidColorBrush WhiteKeyBottom;
+    private static readonly SolidColorBrush BlackKeyTop;
+    private static readonly SolidColorBrush BlackKeySide;
 
     static PianoFlowVisual()
     {
@@ -66,22 +83,57 @@ public class PianoFlowVisual : FrameworkElement
 
         // Pre-build alpha-bucketed brushes for each channel
         NoteBrushCache = new SolidColorBrush[16][];
+        GlowBrushCache = new SolidColorBrush[16][];
+        NoteGradientCache = new LinearGradientBrush[16][];
+
         for (int ch = 0; ch < 16; ch++)
         {
             NoteBrushCache[ch] = new SolidColorBrush[AlphaBuckets];
+            GlowBrushCache[ch] = new SolidColorBrush[AlphaBuckets];
+            NoteGradientCache[ch] = new LinearGradientBrush[AlphaBuckets];
+
             var baseColor = ChannelColors[ch];
+
             for (int a = 0; a < AlphaBuckets; a++)
             {
                 int alphaValue = (int)(a * 255.0 / (AlphaBuckets - 1));
                 alphaValue = Math.Max(80, alphaValue);
+
+                // Main note brush
                 var brush = new SolidColorBrush(
                     Color.FromArgb((byte)alphaValue, baseColor.R, baseColor.G, baseColor.B));
                 brush.Freeze();
                 NoteBrushCache[ch][a] = brush;
+
+                // Glow brush (same color, 40% alpha, used for bloom layer)
+                int glowAlpha = Math.Min(255, alphaValue * 40 / 100);
+                var glow = new SolidColorBrush(
+                    Color.FromArgb((byte)glowAlpha, baseColor.R, baseColor.G, baseColor.B));
+                glow.Freeze();
+                GlowBrushCache[ch][a] = glow;
+
+                // Gradient brush: bright at bottom (hit edge), dimmer at top
+                var grad = new LinearGradientBrush();
+                grad.StartPoint = new Point(0, 1);  // bottom = hit edge
+                grad.EndPoint = new Point(0, 0);    // top = away from piano
+                grad.GradientStops.Add(new GradientStop(
+                    Color.FromArgb((byte)alphaValue, baseColor.R, baseColor.G, baseColor.B), 0.0));
+                grad.GradientStops.Add(new GradientStop(
+                    Color.FromArgb((byte)(alphaValue * 55 / 100), baseColor.R, baseColor.G, baseColor.B), 1.0));
+                grad.Freeze();
+                NoteGradientCache[ch][a] = grad;
             }
         }
 
-        // Pre-build hit flash brushes (20 fade levels)
+        // Impact flash: 12 expanding rings, white with fading alpha
+        ImpactFlashBrushes = new SolidColorBrush[12];
+        for (int i = 0; i < 12; i++)
+        {
+            int alpha = (int)(220 * (1.0 - i / 11.0));
+            ImpactFlashBrushes[i] = MakeBrush((byte)alpha, 255, 255, 255);
+        }
+
+        // Hit flash brushes for piano keys
         HitFlashWhite = new SolidColorBrush[20];
         HitFlashBlack = new SolidColorBrush[20];
         for (int i = 0; i < 20; i++)
@@ -91,12 +143,32 @@ public class PianoFlowVisual : FrameworkElement
             HitFlashBlack[i] = MakeBrush((byte)(fade * 200), 255, 102, 0);
         }
 
-        // Piano key visual brushes
-        PianoKeyBorder = MakeBrush(255, 0, 0, 0);       // black border
-        WhiteKeyTop = MakeBrush(255, 255, 255, 255);     // white highlight
-        WhiteKeyBottom = MakeBrush(255, 200, 200, 204);  // slight gray bottom
-        BlackKeyTop = MakeBrush(255, 245, 245, 245);     // subtle light top
-        BlackKeySide = MakeBrush(255, 54, 54, 58);       // dark side edge
+        // Piano key brushes
+        PianoKeyBorder = MakeBrush(255, 0, 0, 0);
+        WhiteKeyTop = MakeBrush(255, 255, 255, 255);
+        WhiteKeyBottom = MakeBrush(255, 200, 200, 204);
+        BlackKeyTop = MakeBrush(255, 245, 245, 245);
+        BlackKeySide = MakeBrush(255, 54, 54, 58);
+
+        // Background atmosphere: subtle radial glow at piano line
+        AtmosphereBrush = new RadialGradientBrush();
+        AtmosphereBrush.Center = new Point(0.5, 1.0);
+        AtmosphereBrush.RadiusX = 0.7;
+        AtmosphereBrush.RadiusY = 0.3;
+        AtmosphereBrush.GradientStops.Add(new GradientStop(Color.FromArgb(25, 79, 195, 247), 0.0));
+        AtmosphereBrush.GradientStops.Add(new GradientStop(Color.FromArgb(10, 79, 195, 247), 0.5));
+        AtmosphereBrush.GradientStops.Add(new GradientStop(Color.FromArgb(0, 0, 0, 0), 1.0));
+        AtmosphereBrush.Freeze();
+
+        // Keyboard saber gradient (will be colored per-frame based on active notes)
+        SaberGradient = new LinearGradientBrush();
+        SaberGradient.StartPoint = new Point(0, 0.5);
+        SaberGradient.EndPoint = new Point(1, 0.5);
+        SaberGradient.GradientStops.Add(new GradientStop(Color.FromArgb(0, 79, 195, 247), 0.0));
+        SaberGradient.GradientStops.Add(new GradientStop(Color.FromArgb(180, 79, 195, 247), 0.3));
+        SaberGradient.GradientStops.Add(new GradientStop(Color.FromArgb(180, 79, 195, 247), 0.7));
+        SaberGradient.GradientStops.Add(new GradientStop(Color.FromArgb(0, 79, 195, 247), 1.0));
+        SaberGradient.Freeze();
     }
 
     private static SolidColorBrush MakeBrush(byte a, byte r, byte g, byte b)
@@ -112,6 +184,18 @@ public class PianoFlowVisual : FrameworkElement
         return NoteBrushCache[channel % 16][bucket];
     }
 
+    private static SolidColorBrush GetCachedGlowBrush(int channel, double alpha01)
+    {
+        int bucket = (int)(Math.Clamp(alpha01, 0, 1) * (AlphaBuckets - 1) + 0.5);
+        return GlowBrushCache[channel % 16][bucket];
+    }
+
+    private static LinearGradientBrush GetCachedGradientBrush(int channel, double alpha01)
+    {
+        int bucket = (int)(Math.Clamp(alpha01, 0, 1) * (AlphaBuckets - 1) + 0.5);
+        return NoteGradientCache[channel % 16][bucket];
+    }
+
     // --- Precomputed key positions (O(1) lookup) ---
     private int[] _keyX = new int[NoteCount];
     private int[] _keyWidth = new int[NoteCount];
@@ -120,28 +204,33 @@ public class PianoFlowVisual : FrameworkElement
     private int _pianoY;
     private int _pianoHeight;
     private int _blackKeyVisualHeight;
-    private int _gap = 1; // gap between white keys
+    private int _gap = 1;
 
     public int PianoHeight { get; set; } = 120;
 
-    // --- Hit flash tracking ---
+    // --- Impact flash tracking ---
     private double[] _hitTime = new double[NoteCount];
+    private bool[] _hasImpact = new bool[NoteCount];  // tracks active impacts
 
     public PianoFlowVisual()
     {
+        AddVisualChild(_glowVisual);
         AddVisualChild(_visual);
         Array.Fill(_hitTime, -999.0);
     }
 
-    protected override int VisualChildrenCount => 1;
-    protected override Visual GetVisualChild(int index) => _visual;
+    protected override int VisualChildrenCount => 2;
+    protected override Visual GetVisualChild(int index) => index == 0 ? _glowVisual : _visual;
 
-    /// <summary>Record a key hit for flash effect.</summary>
+    /// <summary>Record a key hit for flash + impact effect.</summary>
     public void RecordHit(int note)
     {
         int idx = note - FirstNote;
         if (idx >= 0 && idx < NoteCount)
+        {
             _hitTime[idx] = 0;
+            _hasImpact[idx] = true;
+        }
     }
 
     /// <summary>Update key layout for given dimensions.</summary>
@@ -155,17 +244,14 @@ public class PianoFlowVisual : FrameworkElement
 
     private void ComputeKeyPositions(int width)
     {
-        // Count white keys
         int whiteKeyCount = 0;
         for (int note = FirstNote; note <= LastNote; note++)
             if (!IsBlackKey[note]) whiteKeyCount++;
 
-        // Calculate key widths with gap
         _gap = Math.Max(1, (int)(width * 0.001));
         _whiteKeyWidth = Math.Max(8, (width - _gap * (whiteKeyCount - 1)) / whiteKeyCount);
         _blackKeyWidth = Math.Max(5, (int)(_whiteKeyWidth * 0.58));
 
-        // Build white key positions first
         var whiteX = new int[NoteCount];
         int wx = 0;
         for (int note = FirstNote; note <= LastNote; note++)
@@ -180,13 +266,11 @@ public class PianoFlowVisual : FrameworkElement
             }
         }
 
-        // Build black key positions: centered on the boundary between adjacent white keys
         for (int note = FirstNote; note <= LastNote; note++)
         {
             int idx = note - FirstNote;
             if (!IsBlackKey[note]) continue;
 
-            // Find the white key to the left (the one whose right edge we center on)
             int leftWhite = note - 1;
             while (leftWhite >= FirstNote && IsBlackKey[leftWhite])
                 leftWhite--;
@@ -194,7 +278,6 @@ public class PianoFlowVisual : FrameworkElement
             if (leftWhite >= FirstNote)
             {
                 int leftIdx = leftWhite - FirstNote;
-                // Black key center = right edge of left white key (minus gap/2)
                 int center = whiteX[leftIdx] + _whiteKeyWidth;
                 _keyX[idx] = center - _blackKeyWidth / 2;
             }
@@ -206,7 +289,7 @@ public class PianoFlowVisual : FrameworkElement
         }
     }
 
-    /// <summary>Main render call. Draws notes + particles + piano.</summary>
+    /// <summary>Main render call. Draws atmosphere + glow + notes + particles + piano + saber.</summary>
     public void Render(IReadOnlyList<Models.MidiNote> notes, double currentTime,
         bool falling, double noteSpeed, bool[]? keyActive, ParticleSystem? particles = null)
     {
@@ -216,34 +299,55 @@ public class PianoFlowVisual : FrameworkElement
 
         _pianoY = h - _pianoHeight;
 
+        // --- Glow layer (behind everything) ---
+        using (var dcGlow = _glowVisual.RenderOpen())
+        {
+            // Background atmosphere
+            dcGlow.DrawRectangle(AtmosphereBrush, null, new Rect(0, 0, w, h));
+
+            // Draw glow copies of notes (larger, dimmer, blurred feel)
+            DrawNoteGlow(dcGlow, notes, currentTime, falling, noteSpeed, w, h);
+        }
+
+        // --- Main layer ---
         using var dc = _visual.RenderOpen();
 
         // Background
         dc.DrawRectangle(BrushCache.Background, null, new Rect(0, 0, w, h));
 
-        // Draw notes
+        // Draw notes with gradient
         DrawNotes(dc, notes, currentTime, falling, noteSpeed, w, h);
 
-        // Draw particles (between notes and piano)
+        // Draw impact flashes at piano line
+        DrawImpactFlashes(dc, currentTime, w);
+
+        // Draw particles
         particles?.Draw(dc);
 
         // Draw piano
         DrawPiano(dc, keyActive, currentTime, w, h);
 
+        // Draw keyboard saber (glowing line above piano)
+        DrawKeyboardSaber(dc, keyActive, currentTime, w);
+
         // Draw separator line above piano
         dc.DrawRectangle(BrushCache.Separator, null, new Rect(0, _pianoY - 2, w, 2));
     }
 
-    private void DrawNotes(DrawingContext dc, IReadOnlyList<Models.MidiNote> notes,
+    /// <summary>
+    /// Draw glow/bloom copies of notes. Each note gets a slightly larger, semi-transparent
+    /// version drawn behind it to simulate bloom effect.
+    /// </summary>
+    private void DrawNoteGlow(DrawingContext dc, IReadOnlyList<Models.MidiNote> notes,
         double currentTime, bool falling, double noteSpeed, int w, int h)
     {
         double visibleDuration = _pianoY / noteSpeed;
+        int glowExpand = 4; // pixels to expand glow on each side
 
         for (int i = 0; i < notes.Count; i++)
         {
             var note = notes[i];
 
-            // Visibility culling
             if (falling)
             {
                 if (note.OffTime < currentTime - 0.1 || note.OnTime > currentTime + visibleDuration)
@@ -281,8 +385,156 @@ public class PianoFlowVisual : FrameworkElement
                 (falling ? note.OnTime : note.OffTime) - currentTime);
             double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 100.0 / 255.0);
 
-            var brush = GetCachedNoteBrush(note.Channel, alpha);
-            dc.DrawRectangle(brush, null, new Rect(keyX, yTop, keyW, yBottom - yTop));
+            var glowBrush = GetCachedGlowBrush(note.Channel, alpha);
+            dc.DrawRectangle(glowBrush, null,
+                new Rect(keyX - glowExpand, yTop - glowExpand,
+                         keyW + glowExpand * 2, (yBottom - yTop) + glowExpand * 2));
+        }
+    }
+
+    /// <summary>
+    /// Draw notes with vertical gradient (bright at hit edge, dimmer away from piano).
+    /// This is the MIDIVisualizer-style gradient effect.
+    /// </summary>
+    private void DrawNotes(DrawingContext dc, IReadOnlyList<Models.MidiNote> notes,
+        double currentTime, bool falling, double noteSpeed, int w, int h)
+    {
+        double visibleDuration = _pianoY / noteSpeed;
+
+        for (int i = 0; i < notes.Count; i++)
+        {
+            var note = notes[i];
+
+            if (falling)
+            {
+                if (note.OffTime < currentTime - 0.1 || note.OnTime > currentTime + visibleDuration)
+                    continue;
+            }
+            else
+            {
+                if (note.OnTime > currentTime + 0.1 || note.OffTime < currentTime - visibleDuration)
+                    continue;
+            }
+
+            int noteIndex = note.Note - FirstNote;
+            if ((uint)noteIndex >= NoteCount) continue;
+
+            int keyX = _keyX[noteIndex];
+            int keyW = _keyWidth[noteIndex];
+
+            int yTop, yBottom;
+            if (falling)
+            {
+                yTop = _pianoY - (int)((note.OffTime - currentTime) * noteSpeed);
+                yBottom = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
+            }
+            else
+            {
+                yTop = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
+                yBottom = _pianoY - (int)((note.OffTime - currentTime) * noteSpeed);
+            }
+
+            yTop = Math.Max(0, yTop);
+            yBottom = Math.Min(_pianoY, yBottom);
+            if (yTop >= yBottom) continue;
+
+            double distFromHit = Math.Abs(
+                (falling ? note.OnTime : note.OffTime) - currentTime);
+            double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 100.0 / 255.0);
+
+            // Use gradient brush: bright at piano edge, dimmer away
+            var gradientBrush = GetCachedGradientBrush(note.Channel, alpha);
+            dc.DrawRectangle(gradientBrush, null, new Rect(keyX, yTop, keyW, yBottom - yTop));
+
+            // Bright accent line at the hit edge (where note meets piano)
+            int hitEdgeY = falling ? yBottom : yTop;
+            var accentBrush = GetCachedNoteBrush(note.Channel, 1.0);
+            dc.DrawRectangle(accentBrush, null, new Rect(keyX, hitEdgeY, keyW, 2));
+        }
+    }
+
+    /// <summary>
+    /// Draw expanding flash circles at the piano line when notes are hit.
+    /// Like MIDIVisualizer's impact effect.
+    /// </summary>
+    private void DrawImpactFlashes(DrawingContext dc, double currentTime, int w)
+    {
+        for (int note = FirstNote; note <= LastNote; note++)
+        {
+            int ni = note - FirstNote;
+            if (!_hasImpact[ni]) continue;
+
+            double elapsed = currentTime - _hitTime[ni];
+            if (elapsed < 0 || elapsed > 0.25)
+            {
+                _hasImpact[ni] = false;
+                continue;
+            }
+
+            double progress = elapsed / 0.25;
+            int flashIdx = (int)(progress * 11);
+            flashIdx = Math.Clamp(flashIdx, 0, 11);
+
+            int keyX = _keyX[ni];
+            int keyW = _keyWidth[ni];
+            int cx = keyX + keyW / 2;
+
+            // Expanding horizontal line
+            int expandX = (int)(progress * keyW * 1.5);
+            int expandY = (int)(progress * 8);
+
+            var brush = ImpactFlashBrushes[flashIdx];
+            dc.DrawRectangle(brush, null,
+                new Rect(cx - keyW / 2 - expandX, _pianoY - expandY,
+                         keyW + expandX * 2, 3));
+        }
+    }
+
+    /// <summary>
+    /// Draw glowing line above piano keys (keyboard saber).
+    /// Pulses brighter when keys are active, like Piano VFX's keyboard saber.
+    /// </summary>
+    private void DrawKeyboardSaber(DrawingContext dc, bool[]? keyActive, double currentTime, int w)
+    {
+        // Find if any key is active for saber brightness
+        bool anyActive = false;
+        if (keyActive != null)
+        {
+            for (int i = 0; i < keyActive.Length; i++)
+            {
+                if (keyActive[i]) { anyActive = true; break; }
+            }
+        }
+
+        // Base saber: subtle line above piano
+        int saberY = _pianoY - 4;
+        int saberH = 3;
+
+        // Animate saber brightness with a subtle pulse
+        double pulse = anyActive
+            ? 0.7 + 0.3 * Math.Sin(currentTime * 8)
+            : 0.3 + 0.1 * Math.Sin(currentTime * 2);
+
+        int alpha = (int)(160 * pulse);
+
+        // Draw per-key saber segments that light up with active notes
+        for (int note = FirstNote; note <= LastNote; note++)
+        {
+            if (IsBlackKey[note]) continue;
+            int ni = note - FirstNote;
+            int x = _keyX[ni];
+            int kw = _whiteKeyWidth - _gap;
+
+            bool active = keyActive != null && ni < keyActive.Length && keyActive[ni];
+            int segAlpha = active ? Math.Min(255, alpha + 100) : alpha;
+
+            var saberColor = active
+                ? Color.FromArgb((byte)segAlpha, 120, 220, 255)  // bright cyan when active
+                : Color.FromArgb((byte)segAlpha, 40, 80, 120);   // subtle blue when idle
+
+            var saberBrush = new SolidColorBrush(saberColor);
+            saberBrush.Freeze();
+            dc.DrawRectangle(saberBrush, null, new Rect(x, saberY, kw, saberH));
         }
     }
 
@@ -298,21 +550,13 @@ public class PianoFlowVisual : FrameworkElement
 
             var fill = active ? BrushCache.WhiteKeyActive : BrushCache.WhiteKey;
 
-            // Main fill
             dc.DrawRectangle(fill, null, new Rect(x, _pianoY, _whiteKeyWidth - _gap, _pianoHeight));
-
-            // 3D effect: lighter top edge
             dc.DrawRectangle(WhiteKeyTop, null, new Rect(x + 1, _pianoY + 1, _whiteKeyWidth - _gap - 2, 2));
-
-            // 3D effect: darker bottom edge
             dc.DrawRectangle(WhiteKeyBottom, null,
                 new Rect(x + 1, _pianoY + _pianoHeight - 3, _whiteKeyWidth - _gap - 2, 2));
-
-            // Border
             dc.DrawRectangle(null, new Pen(PianoKeyBorder, 1),
                 new Rect(x, _pianoY, _whiteKeyWidth - _gap, _pianoHeight));
 
-            // Hit flash
             if (active)
             {
                 double elapsed = currentTime - _hitTime[ni];
@@ -337,23 +581,15 @@ public class PianoFlowVisual : FrameworkElement
 
             var fill = active ? BrushCache.BlackKeyActive : BrushCache.BlackKey;
 
-            // Main fill
             dc.DrawRectangle(fill, null, new Rect(x, _pianoY, kw, _blackKeyVisualHeight));
-
-            // Border
             dc.DrawRectangle(null, new Pen(PianoKeyBorder, 1),
                 new Rect(x, _pianoY, kw, _blackKeyVisualHeight));
-
-            // 3D effect: subtle lighter top edge
             dc.DrawRectangle(BlackKeyTop, null, new Rect(x + 1, _pianoY + 1, kw - 2, 1));
-
-            // 3D effect: side edges
             dc.DrawRectangle(BlackKeySide, null,
                 new Rect(x + 1, _pianoY + 1, 1, _blackKeyVisualHeight - 2));
             dc.DrawRectangle(BlackKeySide, null,
                 new Rect(x + kw - 2, _pianoY + 1, 1, _blackKeyVisualHeight - 2));
 
-            // Hit flash
             if (active)
             {
                 double elapsed = currentTime - _hitTime[ni];

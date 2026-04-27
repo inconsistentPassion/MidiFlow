@@ -359,6 +359,14 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 _audio.NoteOn(note.Channel, note.Note, note.Velocity);
                 _activeAudioNotes.Add((note.Channel, note.Note));
+
+                // Visual effects for file playback notes
+                _pianoVisual.RecordHit(note.Note);
+                var color = PianoFlowVisual.ChannelColors[note.Channel % 16];
+                double keyX = _pianoVisual.GetKeyCenterX(note.Note);
+                _particles.Emit(keyX, _pianoVisual.PianoTopY, color);
+                if (note.Velocity > 80)
+                    _particles.EmitSparks(keyX, _pianoVisual.PianoTopY, color);
             }
         }
 
@@ -507,10 +515,14 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         // Record hit for flash effect
         _pianoVisual.RecordHit(note);
 
-        // Spawn particles
+        // Spawn particles (burst + sparks)
         var color = PianoFlowVisual.ChannelColors[channel % 16];
         double keyX = _pianoVisual.GetKeyCenterX(note);
         _particles.Emit(keyX, _pianoVisual.PianoTopY, color);
+
+        // Velocity-based spark intensity
+        if (velocity > 80)
+            _particles.EmitSparks(keyX, _pianoVisual.PianoTopY, color);
     }
 
     private void OnLiveNoteOff(int note, int channel)
