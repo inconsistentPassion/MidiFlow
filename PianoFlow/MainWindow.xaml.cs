@@ -11,9 +11,12 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _vm;
     private readonly DispatcherTimer _renderTimer;
-    private readonly DispatcherTimer _statusBarTimer;
     private Storyboard? _fadeIn;
     private Storyboard? _fadeOut;
+    private Storyboard? _settingsIn;
+    private Storyboard? _settingsOut;
+    private bool _uiVisible;
+    private bool _settingsVisible;
 
     public MainWindow()
     {
@@ -25,56 +28,58 @@ public partial class MainWindow : Window
         _vm.RenderFrameReady += OnRenderFrameReady;
         _vm.ShowMessage += msg => MessageBox.Show(msg, "PianoFlow", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-        // Render timer
+        // Render timer — always runs
         _renderTimer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(1000.0 / 60) // 60 FPS
+            Interval = TimeSpan.FromMilliseconds(1000.0 / 60)
         };
         _renderTimer.Tick += (s, e) => _vm.UpdateFrame();
 
-        // Status bar auto-hide timer
-        _statusBarTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(5)
-        };
-        _statusBarTimer.Tick += (s, e) => FadeOutStatusBar();
-
-        // Setup status bar animations
         SetupAnimations();
     }
 
     private void SetupAnimations()
     {
         _fadeIn = new Storyboard();
-        var fadeInAnim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200));
-        Storyboard.SetTarget(fadeInAnim, StatusBar);
-        Storyboard.SetTargetProperty(fadeInAnim, new PropertyPath(OpacityProperty));
-        _fadeIn.Children.Add(fadeInAnim);
+        var fi = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200));
+        Storyboard.SetTarget(fi, StatusBar);
+        Storyboard.SetTargetProperty(fi, new PropertyPath(OpacityProperty));
+        _fadeIn.Children.Add(fi);
 
         _fadeOut = new Storyboard();
-        var fadeOutAnim = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(500));
-        Storyboard.SetTarget(fadeOutAnim, StatusBar);
-        Storyboard.SetTargetProperty(fadeOutAnim, new PropertyPath(OpacityProperty));
-        _fadeOut.Children.Add(fadeOutAnim);
+        var fo = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200));
+        Storyboard.SetTarget(fo, StatusBar);
+        Storyboard.SetTargetProperty(fo, new PropertyPath(OpacityProperty));
+        _fadeOut.Children.Add(fo);
+
+        _settingsIn = new Storyboard();
+        var si = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(250));
+        Storyboard.SetTarget(si, SettingsPanel);
+        Storyboard.SetTargetProperty(si, new PropertyPath(OpacityProperty));
+        _settingsIn.Children.Add(si);
+
+        _settingsOut = new Storyboard();
+        var so = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200));
+        Storyboard.SetTarget(so, SettingsPanel);
+        Storyboard.SetTargetProperty(so, new PropertyPath(OpacityProperty));
+        _settingsOut.Children.Add(so);
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        // Initialize renderer with current window size
-        UpdateViewLayout();
+        RefreshRendererLayout();
 
-        // Show status bar initially
-        FadeInStatusBar();
+        // Start rendering immediately
+        _renderTimer.Start();
 
-        // Try to connect to first MIDI device
-        var devices = _vm.GetMidiDevices();
-        if (devices.Count > 0)
-        {
-            _vm.ConnectMidiDevice(devices[0].Index);
-        }
+        // Populate MIDI devices
+        RefreshMidiDevices();
+
+        // Status bar starts hidden, user toggles with F1
+        _uiVisible = false;
     }
 
-    private void UpdateViewLayout()
+    private void RefreshRendererLayout()
     {
         int w = (int)ActualWidth;
         int h = (int)ActualHeight;
@@ -82,12 +87,7 @@ public partial class MainWindow : Window
 
         _vm.Width = w;
         _vm.Height = h;
-        _vm.PianoHeight = (int)(h * 0.11); // ~11% of screen height
-
-        // Update renderer layout
         _vm.NoteRenderer.UpdateLayout(w, h, _vm.PianoHeight);
-
-        // Set the Image source
         RenderImage.Source = _vm.NoteRenderer.Bitmap;
     }
 
@@ -95,13 +95,74 @@ public partial class MainWindow : Window
     {
         RenderImage.Source = _vm.Bitmap;
 
-        // Update UI text
         PlayStateText.Text = _vm.IsPlaying
             ? (_vm.IsPaused ? "⏸ Paused" : "▶ Playing")
             : "⏹ Stopped";
         TimeText.Text = _vm.TimeDisplay;
         MidiDeviceText.Text = _vm.MidiDeviceName != null ? $"🎹 {_vm.MidiDeviceName}" : "";
         StatusText.Text = _vm.StatusText ?? "";
+
+        // Hide welcome overlay when a file is loaded
+        WelcomeOverlay.Visibility = _vm.FilePath != null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    // --- F1 toggle for UI ---
+    private void ToggleUI()
+    {
+        _uiVisible = !_uiVisible;
+
+        if (_uiVisible)
+        {
+            StatusBar.Visibility = Visibility.Visible;
+            _fadeIn?.Begin();
+        }
+        else
+        {
+            _fadeOut?.Begin();
+            // Collapse after animation
+            var d = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            d.Tick += (s, e) =>
+            {
+                if (!_uiVisible) StatusBar.Visibility = Visibility.Collapsed;
+                d.Stop();
+            };
+            d.Start();
+        }
+    }
+
+    // --- Settings panel ---
+    private void ToggleSettings()
+    {
+        _settingsVisible = !_settingsVisible;
+
+        if (_settingsVisible)
+        {
+            SettingsPanel.Visibility = Visibility.Visible;
+            _settingsIn?.Begin();
+        }
+        else
+        {
+            _settingsOut?.Begin();
+            var d = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            d.Tick += (s, e) =>
+            {
+                if (!_settingsVisible) SettingsPanel.Visibility = Visibility.Collapsed;
+                d.Stop();
+            };
+            d.Start();
+        }
+    }
+
+    private void RefreshMidiDevices()
+    {
+        MidiDeviceCombo.Items.Clear();
+        var devices = _vm.GetMidiDevices();
+        foreach (var d in devices)
+        {
+            MidiDeviceCombo.Items.Add(d.Name);
+        }
+        if (MidiDeviceCombo.Items.Count > 0)
+            MidiDeviceCombo.SelectedIndex = 0;
     }
 
     // --- Keyboard Input ---
@@ -109,6 +170,11 @@ public partial class MainWindow : Window
     {
         switch (e.Key)
         {
+            case Key.F1:
+                ToggleUI();
+                e.Handled = true;
+                break;
+
             case Key.Space:
                 _vm.TogglePause();
                 e.Handled = true;
@@ -121,18 +187,20 @@ public partial class MainWindow : Window
 
             case Key.F:
                 _vm.FlipDirection();
+                DirFalling.IsChecked = _vm.Falling;
+                DirRising.IsChecked = !_vm.Falling;
                 e.Handled = true;
                 break;
 
             case Key.Up:
                 _vm.NoteSpeed += 50;
-                _vm.StatusText = $"Speed: {_vm.NoteSpeed:F0} px/s";
+                SpeedSlider.Value = _vm.NoteSpeed;
                 e.Handled = true;
                 break;
 
             case Key.Down:
                 _vm.NoteSpeed -= 50;
-                _vm.StatusText = $"Speed: {_vm.NoteSpeed:F0} px/s";
+                SpeedSlider.Value = _vm.NoteSpeed;
                 e.Handled = true;
                 break;
 
@@ -148,7 +216,10 @@ public partial class MainWindow : Window
 
             case Key.Q:
             case Key.Escape:
-                Close();
+                if (_settingsVisible)
+                    ToggleSettings();
+                else
+                    Close();
                 e.Handled = true;
                 break;
         }
@@ -173,9 +244,8 @@ public partial class MainWindow : Window
     {
         if (_vm.LoadFile(path))
         {
-            UpdateViewLayout();
+            RefreshRendererLayout();
             _vm.Play();
-            FadeInStatusBar();
         }
     }
 
@@ -194,10 +264,54 @@ public partial class MainWindow : Window
         {
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
             if (files.Length > 0)
-            {
                 LoadMidiFile(files[0]);
-            }
         }
+    }
+
+    // --- Button handlers ---
+    private void SettingsButton_Click(object sender, RoutedEventArgs e) => ToggleSettings();
+    private void CloseSettingsButton_Click(object sender, RoutedEventArgs e) => ToggleSettings();
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void MidiDeviceCombo_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        int idx = MidiDeviceCombo.SelectedIndex;
+        if (idx >= 0)
+            _vm.ConnectMidiDevice(idx);
+    }
+
+    private void SpeedSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _vm.NoteSpeed = e.NewValue;
+        SpeedLabel.Text = $"{(int)_vm.NoteSpeed} px/s";
+    }
+
+    private void Direction_Changed(object sender, RoutedEventArgs e)
+    {
+        if (DirFalling.IsChecked == true)
+            _vm.Falling = true;
+        else
+            _vm.Falling = false;
+    }
+
+    private void PianoHeightSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_vm == null) return;
+        _vm.PianoHeight = (int)(_vm.Height * e.NewValue / 100.0);
+        PianoHeightLabel.Text = $"{(int)e.NewValue}%";
+        RefreshRendererLayout();
+    }
+
+    private void FullscreenButton_Click(object sender, RoutedEventArgs e)
+    {
+        WindowStyle = WindowStyle.None;
+        WindowState = WindowState.Maximized;
+    }
+
+    private void WindowedButton_Click(object sender, RoutedEventArgs e)
+    {
+        WindowStyle = WindowStyle.SingleBorderWindow;
+        WindowState = WindowState.Normal;
     }
 
     // --- Video Export ---
@@ -217,32 +331,10 @@ public partial class MainWindow : Window
         }
     }
 
-    // --- Status Bar Auto-hide ---
-    private void Window_MouseMove(object sender, MouseEventArgs e)
-    {
-        FadeInStatusBar();
-        _statusBarTimer.Stop();
-        _statusBarTimer.Start();
-    }
-
-    private void FadeInStatusBar()
-    {
-        _fadeOut?.Stop();
-        _fadeIn?.Begin();
-    }
-
-    private void FadeOutStatusBar()
-    {
-        _fadeIn?.Stop();
-        _fadeOut?.Begin();
-        _statusBarTimer.Stop();
-    }
-
     // --- Cleanup ---
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _renderTimer.Stop();
-        _statusBarTimer.Stop();
         _vm.Dispose();
     }
 
@@ -250,8 +342,6 @@ public partial class MainWindow : Window
     {
         base.OnRenderSizeChanged(sizeInfo);
         if (IsLoaded)
-        {
-            UpdateViewLayout();
-        }
+            RefreshRendererLayout();
     }
 }
