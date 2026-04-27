@@ -158,6 +158,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         _pianoVisual = pianoVisual;
         _midiDevice.NoteOn += OnLiveNoteOn;
         _midiDevice.NoteOff += OnLiveNoteOff;
+        _midiDevice.MessageReceived += OnLiveMessageReceived;
     }
 
     // --- SoundFont Loading ---
@@ -387,6 +388,31 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             foreach (var key in toRemove)
                 _activeAudioNotes.Remove(key);
         }
+
+        // --- Process other MIDI events (CC, Program Change, etc.) ---
+        var evts = _midiData.Events;
+        int evtCount = evts.Count;
+        if (evtCount > 0)
+        {
+            // Binary search for first event with Time >= windowStart
+            int elo = 0, ehi = evtCount;
+            while (elo < ehi)
+            {
+                int mid = (elo + ehi) / 2;
+                if (evts[mid].Time < windowStart) elo = mid + 1;
+                else ehi = mid;
+            }
+
+            for (int i = elo; i < evtCount; i++)
+            {
+                var evt = evts[i];
+                if (evt.Time > windowEnd) break;
+                if (evt.Time >= windowStart && evt.Time <= windowEnd)
+                {
+                    _audio.ProcessMidiMessage(evt.Status & 0x0F, evt.Status & 0xF0, evt.Data1, evt.Data2);
+                }
+            }
+        }
     }
 
     /// <summary>Get merged notes, reusing the pre-allocated list.</summary>
@@ -508,6 +534,16 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         // Stop sound
         if (_audio.IsReady)
             _audio.NoteOff(channel, note);
+    }
+
+    private void OnLiveMessageReceived(byte status, byte data1, byte data2)
+    {
+        // Skip NoteOn/NoteOff since they are already handled by specialized events
+        byte type = (byte)(status & 0xF0);
+        if (type == 0x90 || type == 0x80) return;
+
+        if (_audio.IsReady)
+            _audio.ProcessMidiMessage(status & 0x0F, type, data1, data2);
     }
 
     // --- Video Export ---

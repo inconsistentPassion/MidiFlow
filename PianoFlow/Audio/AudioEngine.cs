@@ -40,6 +40,7 @@ public sealed class AudioEngine : IDisposable
     public void Initialize(string soundFontPath, int sampleRate = 44100)
     {
         Dispose();
+        _disposed = false;
 
         _sampleRate = sampleRate;
         _soundFontPath = soundFontPath;
@@ -47,14 +48,15 @@ public sealed class AudioEngine : IDisposable
         lock (_synthLock)
         {
             _synth = new Synthesizer(soundFontPath, _sampleRate);
+            _synth.MasterVolume = 2.0f; // Increase gain for fuller chords
         }
 
         _waveProvider = new SynthWaveProvider(this, _sampleRate);
 
         _waveOut = new WaveOutEvent
         {
-            DesiredLatency = 100,  // 100ms latency - stable, no underruns
-            NumberOfBuffers = 4,   // extra buffer to prevent gaps
+            DesiredLatency = 40,   // 40ms latency - more responsive
+            NumberOfBuffers = 3,
             Volume = _volume
         };
         _waveOut.Init(_waveProvider);
@@ -79,6 +81,15 @@ public sealed class AudioEngine : IDisposable
         }
     }
 
+    /// <summary>Process a raw MIDI message (thread-safe).</summary>
+    public void ProcessMidiMessage(int channel, int command, int data1, int data2)
+    {
+        lock (_synthLock)
+        {
+            _synth?.ProcessMidiMessage(channel, command, data1, data2);
+        }
+    }
+
     /// <summary>Turn off all notes on all channels (thread-safe).</summary>
     public void AllNotesOff()
     {
@@ -91,11 +102,12 @@ public sealed class AudioEngine : IDisposable
     }
 
     /// <summary>Render audio samples into a buffer (called by SynthWaveProvider on audio thread).</summary>
-    internal void RenderSamples(float[] left, float[] right)
+    internal void RenderSamples(float[] left, float[] right, int count)
     {
         lock (_synthLock)
         {
-            _synth?.Render(left, right);
+            if (_synth == null) return;
+            _synth.Render(left.AsSpan(0, count), right.AsSpan(0, count));
         }
     }
 
@@ -119,56 +131,56 @@ public sealed class AudioEngine : IDisposable
 
 /// <summary>
 /// NAudio IWaveProvider that pulls audio samples from a MeltySynth Synthesizer.
-/// Uses unsafe pointer operations for fast interleaving (no per-sample BlockCopy).
+/// Uses unsafe pointer operations for fast interleaving.
 /// </summary>
 internal sealed unsafe class SynthWaveProvider : IWaveProvider
 {
     private readonly AudioEngine _engine;
     private readonly WaveFormat _waveFormat;
-    private readonly int _bufferSamples;
-    private readonly float[] _left;
-    private readonly float[] _right;
+    private float[] _left;
+    private float[] _right;
 
     public SynthWaveProvider(AudioEngine engine, int sampleRate)
     {
         _engine = engine;
         _waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 2);
-        _bufferSamples = sampleRate / 50;  // 20ms chunks (bigger = fewer calls, more stable)
-        _left = new float[_bufferSamples];
-        _right = new float[_bufferSamples];
+        // Initial buffers (200ms)
+        _left = new float[sampleRate / 5];
+        _right = new float[sampleRate / 5];
     }
 
     public WaveFormat WaveFormat => _waveFormat;
 
     public int Read(byte[] buffer, int offset, int count)
     {
-        int samplesNeeded = count / 8;  // stereo float = 8 bytes per sample pair
-        int samplesToRender = Math.Min(samplesNeeded, _bufferSamples);
-        if (samplesToRender <= 0) return count;
+        int samplesNeeded = count / 8; // 2 channels, 4 bytes per float
+        if (samplesNeeded <= 0) return 0;
 
-        // Render via engine (thread-safe)
-        _engine.RenderSamples(_left, _right);
+        // Resize buffers if they are too small for this request
+        if (_left.Length < samplesNeeded)
+        {
+            _left = new float[samplesNeeded];
+            _right = new float[samplesNeeded];
+        }
 
-        // Fast interleave using unsafe pointers
+        // Render samples from the synth
+        _engine.RenderSamples(_left, _right, samplesNeeded);
+
+        // Interleave into the output buffer
         fixed (float* pL = _left, pR = _right)
         fixed (byte* pBuf = buffer)
         {
             float* dst = (float*)(pBuf + offset);
-            float* l = pL;
-            float* r = pR;
-            float* end = l + samplesToRender;
+            float* srcL = pL;
+            float* srcR = pR;
+            float* end = srcL + samplesNeeded;
 
-            while (l < end)
+            while (srcL < end)
             {
-                *dst++ = *l++;
-                *dst++ = *r++;
+                *dst++ = *srcL++;
+                *dst++ = *srcR++;
             }
         }
-
-        // Zero-fill remainder if needed
-        int bytesWritten = samplesToRender * 8;
-        if (bytesWritten < count)
-            Array.Clear(buffer, offset + bytesWritten, count - bytesWritten);
 
         return count;
     }

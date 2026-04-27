@@ -17,6 +17,9 @@ public class MidiDeviceInput : IDisposable
     /// <summary>Fired when a note is released. Parameters: note, channel.</summary>
     public event Action<int, int>? NoteOff;
 
+    /// <summary>Fired for any MIDI channel message. Parameters: status, data1, data2.</summary>
+    public event Action<byte, byte, byte>? MessageReceived;
+
     /// <summary>Currently connected device name, or null.</summary>
     public string? DeviceName { get; private set; }
 
@@ -89,6 +92,15 @@ public class MidiDeviceInput : IDisposable
         {
             var noteOff = (NoteEvent)midiEvent;
             NoteOff?.Invoke(noteOff.NoteNumber, noteOff.Channel - 1);
+        }
+
+        // Fire generic message event for all channel messages
+        if ((int)midiEvent.CommandCode < 0xF0)
+        {
+            byte status = (byte)(e.RawMessage & 0xFF);
+            byte d1 = (byte)((e.RawMessage >> 8) & 0xFF);
+            byte d2 = (byte)((e.RawMessage >> 16) & 0xFF);
+            MessageReceived?.Invoke(status, d1, d2);
         }
     }
 

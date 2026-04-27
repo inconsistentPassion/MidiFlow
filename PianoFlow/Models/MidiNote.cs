@@ -32,3 +32,14 @@ public struct MidiNote
     public override string ToString() =>
         $"Note={Note} Ch={Channel} Vel={Velocity} On={OnTime:F3}s Off={OffTime:F3}s";
 }
+
+/// <summary>
+/// Represents a raw MIDI event (CC, Program Change, etc.) with timing.
+/// </summary>
+public struct MidiEvent
+{
+    public byte Status;
+    public byte Data1;
+    public byte Data2;
+    public double Time;
+}

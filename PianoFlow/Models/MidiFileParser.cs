@@ -11,6 +11,7 @@ public class MidiFileData
     public int TicksPerBeat;
     public double TotalSeconds;
     public List<MidiNote> Notes = new();
+    public List<MidiEvent> Events = new();
     public List<TempoEvent> TempoEvents = new();
     public List<string> TrackNames = new();
 }
@@ -21,6 +22,7 @@ public struct TempoEvent
     public double Seconds;
     public int MicrosecondsPerBeat;
 }
+
 
 /// <summary>
 /// Pure C# MIDI file parser. Handles Format 0 and Format 1 files.
@@ -97,6 +99,7 @@ public static class MidiFileParser
         int trackIndex, MidiFileData data, List<TempoEvent> tempoMap)
     {
         var notes = new List<MidiNote>();
+        var events = new List<MidiEvent>();
         // Active notes: key = (channel, noteNumber)
         var activeNotes = new Dictionary<(int ch, int note), (int velocity, long tick)>();
         long currentTick = 0;
@@ -188,16 +191,17 @@ public static class MidiFileParser
                          eventType == 0xB0 || // Control change
                          eventType == 0xE0)   // Pitch bend
                 {
-                    reader.ReadByte(); // 2-byte data
+                    byte data2 = reader.ReadByte();
+                    events.Add(new MidiEvent { Status = eventStatus, Data1 = data1, Data2 = data2, Time = currentTick });
                 }
                 else if (eventType == 0xC0 || // Program change
                          eventType == 0xD0)    // Channel aftertouch
                 {
-                    // 1-byte data, already read data1
+                    events.Add(new MidiEvent { Status = eventStatus, Data1 = data1, Data2 = 0, Time = currentTick });
                 }
             }
         }
-
+        data.Events.AddRange(events);
         return notes;
     }
 
@@ -259,6 +263,17 @@ public static class MidiFileParser
             note.OffTime = TickToSeconds((long)note.OffTime, data.TicksPerBeat, tempoMap);
             data.Notes[i] = note;
         }
+
+        // Convert each event's tick times to seconds
+        for (int i = 0; i < data.Events.Count; i++)
+        {
+            var evt = data.Events[i];
+            evt.Time = TickToSeconds((long)evt.Time, data.TicksPerBeat, tempoMap);
+            data.Events[i] = evt;
+        }
+
+        // Sort events by time
+        data.Events.Sort((a, b) => a.Time.CompareTo(b.Time));
     }
 
     private static double TickToSeconds(long tick, int ticksPerBeat, List<TempoEvent> tempoMap)
