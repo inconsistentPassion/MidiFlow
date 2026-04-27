@@ -28,11 +28,12 @@
                 <TextBlock Text="MIDI Piano Visualizer" Foreground="#666" FontSize="14"
                            HorizontalAlignment="Center" Margin="0,0,0,24"/>
                 <TextBlock Foreground="#888" FontSize="13" HorizontalAlignment="Center" TextWrapping="Wrap"
-                           MaxWidth="400">
+                           MaxWidth="420">
                     Press O to open a MIDI file, or drag &amp; drop a .mid file here.
+                    Drop a .sf2 SoundFont for audio.
                 </TextBlock>
                 <TextBlock Foreground="#555" FontSize="12" HorizontalAlignment="Center" Margin="0,16,0,0">
-                    F1 — Toggle controls
+                    F1 — Toggle controls &nbsp; S — Load SoundFont
                 </TextBlock>
             </StackPanel>
         </Border>
@@ -68,6 +69,7 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
                 <TextBlock x:Name="PlayStateText" Grid.Column="0"
@@ -76,14 +78,17 @@
                 <TextBlock x:Name="TimeText" Grid.Column="1"
                            Text="0:00 / 0:00" Foreground="#AAA" FontSize="13"
                            VerticalAlignment="Center" HorizontalAlignment="Center"/>
-                <TextBlock x:Name="MidiDeviceText" Grid.Column="2"
+                <TextBlock x:Name="SoundFontLabel" Grid.Column="2"
+                           Text="🎵 No SoundFont" Foreground="#666" FontSize="12"
+                           VerticalAlignment="Center" Margin="0,0,16,0"/>
+                <TextBlock x:Name="MidiDeviceText" Grid.Column="3"
                            Text="" Foreground="#666" FontSize="12"
                            VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <TextBlock x:Name="StatusText" Grid.Column="3"
+                <TextBlock x:Name="StatusText" Grid.Column="4"
                            Text="" Foreground="#555" FontSize="12"
                            VerticalAlignment="Center" Margin="0,0,16,0"/>
-                <TextBlock Grid.Column="4"
-                           Text="Space ▶⏸  R ↻  F ↕  ↑↓ Speed  E Export  O Open  F1 UI  Q Quit"
+                <TextBlock Grid.Column="5"
+                           Text="Space ▶⏸  R ↻  F ↕  ↑↓ Speed  S SoundFont  M Mute  E Export  O Open  F1 UI  Q Quit"
                            Foreground="#444" FontSize="11" VerticalAlignment="Center"/>
             </Grid>
         </Border>
@@ -113,6 +118,11 @@
                             ValueChanged="SpeedSlider_Changed"/>
                     <TextBlock x:Name="SpeedLabel" Text="300 px/s" Foreground="#666" FontSize="11"
                                HorizontalAlignment="Right" Margin="0,0,0,8"/>
+                    <Separator Background="#222" Margin="0,4,0,12"/>
+
+                    <TextBlock Text="🔊 Volume" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>
+                    <Slider x:Name="VolumeSlider" Minimum="0" Maximum="100" Value="70"
+                            ValueChanged="VolumeSlider_Changed"/>
                     <Separator Background="#222" Margin="0,4,0,12"/>
 
                     <TextBlock Text="Note Direction" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>

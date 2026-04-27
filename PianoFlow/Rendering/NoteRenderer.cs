@@ -5,13 +5,11 @@ namespace PianoFlow.Rendering;
 
 /// <summary>
 /// GPU-accelerated piano + note renderer using WPF DrawingVisual.
-/// Replaces WriteableBitmap approach for 60fps performance.
+/// Performance-optimized: pre-cached brushes, precomputed key positions, zero per-frame allocations.
 /// </summary>
 public class PianoFlowVisual : FrameworkElement
 {
     private readonly DrawingVisual _visual = new();
-    private List<VisualHit>? _keyHits; // for hit flash effect
-    private double _lastHitTime;
 
     // Key range: A0 (21) to C8 (108)
     public const int FirstNote = 21;
@@ -26,8 +24,15 @@ public class PianoFlowVisual : FrameworkElement
         }).ToArray();
 
     // 16 channel colors
-    private static readonly SolidColorBrush[] ChannelBrushes;
     public static readonly Color[] ChannelColors;
+    private static readonly SolidColorBrush[] ChannelBrushes;
+
+    // --- Pre-cached note brushes: [channel, alphaBucket] ---
+    // Alpha quantized to 16 levels
+    private const int AlphaBuckets = 16;
+    private static readonly SolidColorBrush[][] NoteBrushCache;
+    private static readonly SolidColorBrush[] HitFlashWhite;
+    private static readonly SolidColorBrush[] HitFlashBlack;
 
     static PianoFlowVisual()
     {
@@ -52,39 +57,80 @@ public class PianoFlowVisual : FrameworkElement
         };
         ChannelBrushes = ChannelColors.Select(c => new SolidColorBrush(c)).ToArray();
         foreach (var b in ChannelBrushes) b.Freeze();
+
+        // Pre-build alpha-bucketed brushes for each channel
+        NoteBrushCache = new SolidColorBrush[16][];
+        for (int ch = 0; ch < 16; ch++)
+        {
+            NoteBrushCache[ch] = new SolidColorBrush[AlphaBuckets];
+            var baseColor = ChannelColors[ch];
+            for (int a = 0; a < AlphaBuckets; a++)
+            {
+                int alphaValue = (int)(a * 255.0 / (AlphaBuckets - 1));
+                alphaValue = Math.Max(80, alphaValue);
+                var brush = new SolidColorBrush(
+                    Color.FromArgb((byte)alphaValue, baseColor.R, baseColor.G, baseColor.B));
+                brush.Freeze();
+                NoteBrushCache[ch][a] = brush;
+            }
+        }
+
+        // Pre-build hit flash brushes (20 fade levels)
+        HitFlashWhite = new SolidColorBrush[20];
+        HitFlashBlack = new SolidColorBrush[20];
+        for (int i = 0; i < 20; i++)
+        {
+            double fade = i / 19.0;
+            HitFlashWhite[i] = MakeBrush((byte)(fade * 180), 255, 136, 0);
+            HitFlashBlack[i] = MakeBrush((byte)(fade * 200), 255, 102, 0);
+        }
     }
 
-    // Key layout cache
-    private int[] _whiteKeyX = Array.Empty<int>();
+    private static SolidColorBrush GetCachedNoteBrush(int channel, double alpha01)
+    {
+        int bucket = (int)(Math.Clamp(alpha01, 0, 1) * (AlphaBuckets - 1) + 0.5);
+        return NoteBrushCache[channel % 16][bucket];
+    }
+
+    // --- Precomputed key positions (O(1) lookup) ---
+    private int[] _keyX = new int[NoteCount];       // X position for each note
+    private int[] _blackKeyX = new int[NoteCount];   // X position for black keys (precomputed)
     private int _whiteKeyWidth;
     private int _blackKeyWidth;
     private int _pianoY;
     private int _pianoHeight;
+    private int _blackKeyVisualHeight;
 
     public int PianoHeight { get; set; } = 120;
+
+    // --- Hit flash tracking (per-note) ---
+    private double[] _hitTime = new double[NoteCount]; // time of last hit per note index
+
+    private static SolidColorBrush MakeBrush(byte a, byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromArgb(a, r, g, b));
+        brush.Freeze();
+        return brush;
+    }
 
     public PianoFlowVisual()
     {
         AddVisualChild(_visual);
-        _keyHits = new List<VisualHit>();
+        Array.Fill(_hitTime, -999.0);
     }
 
     protected override int VisualChildrenCount => 1;
     protected override Visual GetVisualChild(int index) => _visual;
 
-    /// <summary>Hit flash effect data.</summary>
-    public struct VisualHit
-    {
-        public int NoteIndex;
-        public double Time;
-    }
-
     /// <summary>Record a key hit for flash effect.</summary>
     public void RecordHit(int note)
     {
-        _keyHits ??= new List<VisualHit>();
-        _keyHits.Add(new VisualHit { NoteIndex = note - FirstNote, Time = 0 });
-        _lastHitTime = 0;
+        int idx = note - FirstNote;
+        if (idx >= 0 && idx < NoteCount)
+        {
+            _hitTime[idx] = 0; // will be set to currentTime on next render
+            _hitCount++;
+        }
     }
 
     /// <summary>Update key layout for given dimensions.</summary>
@@ -92,6 +138,7 @@ public class PianoFlowVisual : FrameworkElement
     {
         _pianoHeight = PianoHeight;
         _pianoY = height - _pianoHeight;
+        _blackKeyVisualHeight = (int)(_pianoHeight * 0.65);
         ComputeKeyPositions(width);
     }
 
@@ -104,18 +151,28 @@ public class PianoFlowVisual : FrameworkElement
         _whiteKeyWidth = Math.Max(1, width / whiteKeyCount);
         _blackKeyWidth = Math.Max(1, (int)(_whiteKeyWidth * 0.6));
 
-        var list = new List<int>();
+        // Precompute X for ALL notes (both white and black) - O(1) lookup later
         int wi = 0;
         for (int note = FirstNote; note <= LastNote; note++)
         {
-            if (!IsBlackKey[note]) { list.Add(wi * _whiteKeyWidth); wi++; }
+            int idx = note - FirstNote;
+            if (!IsBlackKey[note])
+            {
+                _keyX[idx] = wi * _whiteKeyWidth;
+                wi++;
+            }
+            else
+            {
+                // Black key is centered between adjacent white keys
+                int x = wi * _whiteKeyWidth - _blackKeyWidth / 2;
+                _keyX[idx] = x;
+            }
         }
-        _whiteKeyX = list.ToArray();
     }
 
-    /// <summary>Main render call. Draws notes + piano + particles.</summary>
+    /// <summary>Main render call. Draws notes + particles + piano.</summary>
     public void Render(IReadOnlyList<Models.MidiNote> notes, double currentTime,
-        bool falling, double noteSpeed, bool[]? keyActive)
+        bool falling, double noteSpeed, bool[]? keyActive, ParticleSystem? particles = null)
     {
         int w = (int)ActualWidth;
         int h = (int)ActualHeight;
@@ -131,6 +188,9 @@ public class PianoFlowVisual : FrameworkElement
         // Draw notes
         DrawNotes(dc, notes, currentTime, falling, noteSpeed, w, h);
 
+        // Draw particles (between notes and piano)
+        particles?.Draw(dc);
+
         // Draw piano
         DrawPiano(dc, keyActive, currentTime, w, h);
 
@@ -143,8 +203,10 @@ public class PianoFlowVisual : FrameworkElement
     {
         double visibleDuration = _pianoY / noteSpeed;
 
-        foreach (var note in notes)
+        for (int i = 0; i < notes.Count; i++)
         {
+            var note = notes[i];
+
             // Visibility culling
             if (falling)
             {
@@ -158,9 +220,10 @@ public class PianoFlowVisual : FrameworkElement
             }
 
             int noteIndex = note.Note - FirstNote;
-            if (noteIndex < 0 || noteIndex >= NoteCount) continue;
+            if ((uint)noteIndex >= NoteCount) continue;
 
-            int keyX = GetKeyX(noteIndex);
+            // O(1) key position lookup
+            int keyX = _keyX[noteIndex];
             int keyW = IsBlackKey[note.Note] ? _blackKeyWidth : _whiteKeyWidth;
 
             int yTop, yBottom;
@@ -179,99 +242,59 @@ public class PianoFlowVisual : FrameworkElement
             yBottom = Math.Min(_pianoY, yBottom);
             if (yTop >= yBottom) continue;
 
-            // Alpha fade based on distance from hit point
+            // Alpha from distance - use cached brush (zero allocation)
             double distFromHit = Math.Abs(
                 (falling ? note.OnTime : note.OffTime) - currentTime);
-            byte alpha = (byte)Math.Max(80, 255 - (int)(distFromHit * 100));
+            double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 100.0 / 255.0);
 
-            var color = ChannelColors[note.Channel % 16];
-            var brush = new SolidColorBrush(Color.FromArgb(alpha, color.R, color.G, color.B));
-            brush.Freeze();
-
+            var brush = GetCachedNoteBrush(note.Channel, alpha);
             dc.DrawRectangle(brush, null, new Rect(keyX, yTop, keyW, yBottom - yTop));
         }
     }
 
     private void DrawPiano(DrawingContext dc, bool[]? keyActive, double currentTime, int w, int h)
     {
-        // White keys
-        int wi = 0;
         for (int note = FirstNote; note <= LastNote; note++)
         {
-            if (IsBlackKey[note]) continue;
-            int x = wi * _whiteKeyWidth;
             int ni = note - FirstNote;
             bool active = keyActive != null && ni < keyActive.Length && keyActive[ni];
+            bool black = IsBlackKey[note];
+            int x = _keyX[ni];
 
-            var brush = active ? BrushCache.WhiteKeyActive : BrushCache.WhiteKey;
-            dc.DrawRectangle(brush, null, new Rect(x, _pianoY, _whiteKeyWidth - 1, _pianoHeight));
-
-            // Hit flash
-            if (active && _keyHits != null)
+            if (black)
             {
-                var hit = _keyHits.FirstOrDefault(k => k.NoteIndex == ni);
-                if (hit.NoteIndex == ni)
+                var brush = active ? BrushCache.BlackKeyActive : BrushCache.BlackKey;
+                dc.DrawRectangle(brush, null, new Rect(x, _pianoY, _blackKeyWidth, _blackKeyVisualHeight));
+
+                // Hit flash
+                if (active)
                 {
-                    double fade = 1.0 - Math.Min(1.0, (currentTime - hit.Time) * 5);
-                    if (fade > 0)
+                    double elapsed = currentTime - _hitTime[ni];
+                    if (elapsed >= 0 && elapsed < 0.3)
                     {
-                        var flash = new SolidColorBrush(Color.FromArgb((byte)(fade * 180), 255, 136, 0));
-                        flash.Freeze();
-                        dc.DrawRectangle(flash, null, new Rect(x, _pianoY, _whiteKeyWidth - 1, _pianoHeight));
+                        int fi = (int)((1.0 - elapsed / 0.3) * 19 + 0.5);
+                        dc.DrawRectangle(HitFlashBlack[fi], null,
+                            new Rect(x, _pianoY, _blackKeyWidth, _blackKeyVisualHeight));
                     }
                 }
             }
-            wi++;
-        }
-
-        // Black keys
-        wi = 0;
-        for (int note = FirstNote; note <= LastNote; note++)
-        {
-            if (!IsBlackKey[note]) { wi++; continue; }
-            int x = wi * _whiteKeyWidth - _blackKeyWidth / 2;
-            int ni = note - FirstNote;
-            bool active = keyActive != null && ni < keyActive.Length && keyActive[ni];
-
-            var brush = active ? BrushCache.BlackKeyActive : BrushCache.BlackKey;
-            int bkH = (int)(_pianoHeight * 0.65);
-            dc.DrawRectangle(brush, null, new Rect(x, _pianoY, _blackKeyWidth, bkH));
-
-            if (active && _keyHits != null)
+            else
             {
-                var hit = _keyHits.FirstOrDefault(k => k.NoteIndex == ni);
-                if (hit.NoteIndex == ni)
+                var brush = active ? BrushCache.WhiteKeyActive : BrushCache.WhiteKey;
+                dc.DrawRectangle(brush, null, new Rect(x, _pianoY, _whiteKeyWidth - 1, _pianoHeight));
+
+                // Hit flash
+                if (active)
                 {
-                    double fade = 1.0 - Math.Min(1.0, (currentTime - hit.Time) * 5);
-                    if (fade > 0)
+                    double elapsed = currentTime - _hitTime[ni];
+                    if (elapsed >= 0 && elapsed < 0.3)
                     {
-                        var flash = new SolidColorBrush(Color.FromArgb((byte)(fade * 200), 255, 102, 0));
-                        flash.Freeze();
-                        dc.DrawRectangle(flash, null, new Rect(x, _pianoY, _blackKeyWidth, bkH));
+                        int fi = (int)((1.0 - elapsed / 0.3) * 19 + 0.5);
+                        dc.DrawRectangle(HitFlashWhite[fi], null,
+                            new Rect(x, _pianoY, _whiteKeyWidth - 1, _pianoHeight));
                     }
                 }
             }
-        }
-    }
-
-    private int GetKeyX(int noteIndex)
-    {
-        int note = noteIndex + FirstNote;
-        if (IsBlackKey[note])
-        {
-            int whiteBefore = 0;
-            for (int n = FirstNote; n < note; n++)
-                if (!IsBlackKey[n]) whiteBefore++;
-            if (whiteBefore > 0 && whiteBefore < _whiteKeyX.Length)
-                return _whiteKeyX[whiteBefore] - _blackKeyWidth / 2;
-            return 0;
-        }
-        else
-        {
-            int wi = 0;
-            for (int n = FirstNote; n < note; n++)
-                if (!IsBlackKey[n]) wi++;
-            return wi < _whiteKeyX.Length ? _whiteKeyX[wi] : 0;
         }
     }
 
@@ -279,10 +302,9 @@ public class PianoFlowVisual : FrameworkElement
     public double GetKeyCenterX(int note)
     {
         int ni = note - FirstNote;
-        if (ni < 0 || ni >= NoteCount) return 0;
-        int x = GetKeyX(ni);
+        if ((uint)ni >= NoteCount) return 0;
         int w = IsBlackKey[note] ? _blackKeyWidth : _whiteKeyWidth;
-        return x + w / 2.0;
+        return _keyX[ni] + w / 2.0;
     }
 
     /// <summary>Get the Y position of the piano top.</summary>
@@ -311,8 +333,8 @@ public static class BrushCache
 
     private static SolidColorBrush Make(byte r, byte g, byte b)
     {
-        var b2 = new SolidColorBrush(Color.FromRgb(r, g, b));
-        b2.Freeze();
-        return b2;
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
     }
 }

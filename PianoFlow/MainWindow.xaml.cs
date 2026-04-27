@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -11,7 +12,6 @@ namespace PianoFlow;
 public partial class MainWindow : Window
 {
     private MainViewModel _vm = null!;
-    private readonly DispatcherTimer _renderTimer;
     private readonly PianoFlowVisual _pianoVisual;
     private Storyboard? _fadeIn;
     private Storyboard? _fadeOut;
@@ -35,12 +35,6 @@ public partial class MainWindow : Window
 
         _vm.RenderFrameReady += OnRenderFrameReady;
         _vm.ShowMessage += msg => MessageBox.Show(msg, "PianoFlow", MessageBoxButton.OK, MessageBoxImage.Warning);
-
-        _renderTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(1000.0 / 60)
-        };
-        _renderTimer.Tick += OnRenderTick;
     }
 
     private void SetupAnimations()
@@ -72,7 +66,11 @@ public partial class MainWindow : Window
         _settingsOut.Children.Add(so);
     }
 
-    private void OnRenderTick(object? sender, EventArgs e)
+    /// <summary>
+    /// WPF frame-synced render callback. Replaces DispatcherTimer for smoother,
+    /// vsync-aligned rendering with zero timer drift.
+    /// </summary>
+    private void OnRenderingFrame(object? sender, EventArgs e)
     {
         if (!_layoutReady) return;
         try
@@ -90,9 +88,71 @@ public partial class MainWindow : Window
         SetupAnimations();
         RefreshRendererLayout();
         _layoutReady = true;
-        _renderTimer.Start();
+
+        // Use CompositionTarget.Rendering for vsync-aligned frame updates
+        // This is smoother and more efficient than DispatcherTimer
+        CompositionTarget.Rendering += OnRenderingFrame;
+
         RefreshMidiDevices();
         _uiVisible = false;
+
+        // Auto-discover SoundFont files in common locations
+        TryAutoLoadSoundFont();
+    }
+
+    /// <summary>
+    /// Search for .sf2 files in common locations and load the first one found.
+    /// Users can also manually load via settings.
+    /// </summary>
+    private void TryAutoLoadSoundFont()
+    {
+        string[] searchPaths = new[]
+        {
+            AppDomain.CurrentDomain.BaseDirectory,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
+            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+        };
+
+        string[] commonNames = new[]
+        {
+            "FluidR3_GM.sf2",
+            "FluidR3.sf2",
+            "GeneralUser.sf2",
+            "TimGM6.sf2",
+            "MuseScore_General.sf2",
+        };
+
+        foreach (var dir in searchPaths)
+        {
+            // Check common names first
+            foreach (var name in commonNames)
+            {
+                string path = Path.Combine(dir, name);
+                if (File.Exists(path))
+                {
+                    _vm.LoadSoundFont(path);
+                    SoundFontLabel.Text = $"🎵 {name}";
+                    return;
+                }
+            }
+
+            // Then check for any .sf2 file
+            try
+            {
+                var sf2Files = Directory.GetFiles(dir, "*.sf2", SearchOption.TopDirectoryOnly);
+                if (sf2Files.Length > 0)
+                {
+                    _vm.LoadSoundFont(sf2Files[0]);
+                    SoundFontLabel.Text = $"🎵 {Path.GetFileName(sf2Files[0])}";
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        // No SoundFont found - prompt user
+        SoundFontLabel.Text = "🎵 No SoundFont loaded";
+        _vm.StatusText = "Load a .sf2 SoundFont file for audio (S key)";
     }
 
     private void RefreshRendererLayout()
@@ -212,6 +272,14 @@ public partial class MainWindow : Window
                 OnOpenFile();
                 e.Handled = true;
                 break;
+            case Key.S:
+                OnLoadSoundFont();
+                e.Handled = true;
+                break;
+            case Key.M:
+                OnToggleMute();
+                e.Handled = true;
+                break;
             case Key.Q:
             case Key.Escape:
                 if (_settingsVisible) ToggleSettings();
@@ -230,6 +298,28 @@ public partial class MainWindow : Window
         };
         if (dlg.ShowDialog() == true)
             LoadMidiFile(dlg.FileName);
+    }
+
+    private void OnLoadSoundFont()
+    {
+        var dlg = new OpenFileDialog
+        {
+            Filter = "SoundFont Files (*.sf2)|*.sf2|All Files (*.*)|*.*",
+            Title = "Load SoundFont"
+        };
+        if (dlg.ShowDialog() == true)
+        {
+            _vm.LoadSoundFont(dlg.FileName);
+            SoundFontLabel.Text = $"🎵 {System.IO.Path.GetFileName(dlg.FileName)}";
+        }
+    }
+
+    private bool _muted;
+    private void OnToggleMute()
+    {
+        _muted = !_muted;
+        _vm.Audio.Volume = _muted ? 0f : 0.7f;
+        VolumeSlider.Value = _muted ? 0 : 70;
     }
 
     private void LoadMidiFile(string path)
@@ -254,7 +344,19 @@ public partial class MainWindow : Window
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
         {
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-            if (files.Length > 0) LoadMidiFile(files[0]);
+            if (files.Length > 0)
+            {
+                string path = files[0];
+                if (path.EndsWith(".sf2", StringComparison.OrdinalIgnoreCase))
+                {
+                    _vm.LoadSoundFont(path);
+                    SoundFontLabel.Text = $"🎵 {System.IO.Path.GetFileName(path)}";
+                }
+                else
+                {
+                    LoadMidiFile(path);
+                }
+            }
         }
     }
 
@@ -274,6 +376,13 @@ public partial class MainWindow : Window
         if (_vm == null || SpeedLabel == null) return;
         _vm.NoteSpeed = e.NewValue;
         SpeedLabel.Text = $"{(int)_vm.NoteSpeed} px/s";
+    }
+
+    private void VolumeSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_vm == null) return;
+        _vm.Audio.Volume = (float)(e.NewValue / 100.0);
+        _muted = e.NewValue <= 0;
     }
 
     private void Direction_Changed(object sender, RoutedEventArgs e)
@@ -319,7 +428,7 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        _renderTimer.Stop();
+        CompositionTarget.Rendering -= OnRenderingFrame;
         _vm.Dispose();
     }
 

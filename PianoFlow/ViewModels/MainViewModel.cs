@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using PianoFlow.Audio;
 using PianoFlow.Export;
 using PianoFlow.Models;
 using PianoFlow.Rendering;
@@ -8,7 +9,7 @@ using PianoFlow.Rendering;
 namespace PianoFlow.ViewModels;
 
 /// <summary>
-/// Main ViewModel: orchestrates MIDI loading, playback, rendering, and export.
+/// Main ViewModel: orchestrates MIDI loading, playback, audio synthesis, rendering, and export.
 /// </summary>
 public class MainViewModel : INotifyPropertyChanged, IDisposable
 {
@@ -18,6 +19,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private readonly PianoFlowVisual _pianoVisual;
     private readonly ParticleSystem _particles = new();
     private readonly VideoExporter _exporter = new();
+    private readonly AudioEngine _audio = new();
 
     // --- Playback ---
     private double _currentTime;
@@ -28,16 +30,24 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
 
     // --- Piano state ---
     private bool[] _keyActive = new bool[PianoFlowVisual.NoteCount];
-    private double[] _keyFadeTime = new double[PianoFlowVisual.NoteCount];
 
     // --- Live notes ---
     private readonly List<MidiNote> _liveNotes = new();
     private DateTime _playbackStartTime;
 
+    // --- Pre-allocated merged note list (avoids per-frame allocation) ---
+    private List<MidiNote> _mergedNotes = new();
+    private bool _mergedDirty = true;
+
+    // --- Audio sync state ---
+    private int _audioNoteIndex;  // cursor through sorted notes for audio scheduling
+    private HashSet<(int ch, int note)> _activeAudioNotes = new();
+
     // --- Export ---
     private bool _isExporting;
     private int _exportFrame;
     private int _exportTotalFrames;
+    private RenderTargetBitmap? _exportRtb;  // reused across frames
 
     // --- Config ---
     private int _width = 1920;
@@ -54,6 +64,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
 
     // --- Properties ---
     public PianoFlowVisual PianoVisual => _pianoVisual;
+    public AudioEngine Audio => _audio;
 
     public bool IsPlaying
     {
@@ -150,6 +161,23 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         _midiDevice.NoteOff += OnLiveNoteOff;
     }
 
+    // --- SoundFont Loading ---
+    public bool LoadSoundFont(string sf2Path)
+    {
+        try
+        {
+            _audio.Initialize(sf2Path);
+            StatusText = $"SoundFont loaded: {System.IO.Path.GetFileName(sf2Path)}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"SoundFont error: {ex.Message}";
+            ShowMessage?.Invoke($"Failed to load SoundFont:\n{ex.Message}");
+            return false;
+        }
+    }
+
     // --- MIDI File Loading ---
     public bool LoadFile(string path)
     {
@@ -163,8 +191,11 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             CurrentTime = 0;
 
             Array.Clear(_keyActive);
-            Array.Clear(_keyFadeTime);
             _liveNotes.Clear();
+            _mergedDirty = true;
+            _audioNoteIndex = 0;
+            _activeAudioNotes.Clear();
+            _audio.AllNotesOff();
 
             StatusText = $"Loaded: {System.IO.Path.GetFileName(path)} " +
                          $"({_midiData.Notes.Count} notes, {FormatTime(_midiData.TotalSeconds)})";
@@ -194,6 +225,8 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     public void Pause()
     {
         IsPaused = true;
+        _audio.AllNotesOff();
+        _activeAudioNotes.Clear();
         StatusText = "Paused";
     }
 
@@ -208,9 +241,12 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         CurrentTime = 0;
         Array.Clear(_keyActive);
-        Array.Clear(_keyFadeTime);
         _liveNotes.Clear();
+        _mergedDirty = true;
         _particles.Clear();
+        _audioNoteIndex = 0;
+        _activeAudioNotes.Clear();
+        _audio.AllNotesOff();
         if (IsPlaying) Play();
     }
 
@@ -249,6 +285,8 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         if (_midiData == null && _liveNotes.Count == 0) return;
 
+        double prevTime = _currentTime;
+
         // Update playback time
         if (IsPlaying && !IsPaused)
         {
@@ -258,57 +296,151 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             {
                 IsPlaying = false;
                 IsPaused = false;
+                _audio.AllNotesOff();
+                _activeAudioNotes.Clear();
                 StatusText = "Finished";
             }
         }
 
-        // Update key states
-        var allNotes = GetAllVisibleNotes();
-        Array.Clear(_keyActive);
-        foreach (var note in allNotes)
+        // --- Audio synthesis: schedule note events between prevTime and currentTime ---
+        if (_audio.IsReady && _midiData != null && IsPlaying && !IsPaused)
         {
-            int idx = note.Note - PianoFlowVisual.FirstNote;
-            if (idx >= 0 && idx < _keyActive.Length)
-            {
-                if (note.OnTime <= CurrentTime && note.OffTime > CurrentTime)
-                    _keyActive[idx] = true;
-            }
+            SyncAudio(prevTime, _currentTime);
         }
+
+        // Get merged notes (reuses list, avoids allocation)
+        var allNotes = GetMergedNotes();
+
+        // Update key states
+        UpdateKeyStates(allNotes);
 
         // Update particles
         _particles.Update(1.0 / _fps);
 
         // Render via WPF DrawingVisual (GPU accelerated)
-        _pianoVisual.Render(allNotes, CurrentTime, Falling, _noteSpeed, _keyActive);
+        _pianoVisual.Render(allNotes, _currentTime, Falling, _noteSpeed, _keyActive, _particles);
 
         RenderFrameReady?.Invoke();
 
         // Export frame if exporting
         if (IsExporting)
         {
-            // For export, render to a RenderTargetBitmap
-            var rtb = new RenderTargetBitmap(_width, _height, 96, 96, PixelFormats.Pbgra32);
-            rtb.Render(_pianoVisual);
-            _exporter.WriteFrame(rtb);
-            _exportFrame++;
-            if (_exportFrame >= _exportTotalFrames)
-            {
-                _exporter.FinishExport(_exportTotalFrames);
-                IsExporting = false;
-                StatusText = "Export complete!";
-            }
+            ExportFrame();
         }
     }
 
-    private IReadOnlyList<MidiNote> GetAllVisibleNotes()
+    /// <summary>
+    /// Sync audio: fire NoteOn/NoteOff for notes between prevTime and currentTime.
+    /// Also turn off notes that have ended.
+    /// </summary>
+    private void SyncAudio(double prevTime, double currentTime)
+    {
+        if (_midiData == null) return;
+        var notes = _midiData.Notes;
+
+        // Schedule new notes that started between prevTime and currentTime
+        while (_audioNoteIndex < notes.Count)
+        {
+            var note = notes[_audioNoteIndex];
+            if (note.OnTime > currentTime) break;
+
+            if (note.OnTime >= prevTime && note.OnTime <= currentTime)
+            {
+                _audio.NoteOn(note.Channel, note.Note, note.Velocity);
+                _activeAudioNotes.Add((note.Channel, note.Note));
+            }
+            _audioNoteIndex++;
+        }
+
+        // Turn off notes that have ended
+        var toRemove = new List<(int ch, int note)>();
+        foreach (var (ch, n) in _activeAudioNotes)
+        {
+            // Find the note to check its OffTime
+            // Use binary search or just scan recent notes
+            bool shouldOff = false;
+            for (int i = Math.Max(0, _audioNoteIndex - 200); i < _audioNoteIndex; i++)
+            {
+                if (notes[i].Channel == ch && notes[i].Note == n && notes[i].OffTime <= currentTime)
+                {
+                    shouldOff = true;
+                    break;
+                }
+            }
+            if (shouldOff)
+            {
+                _audio.NoteOff(ch, n);
+                toRemove.Add((ch, n));
+            }
+        }
+        foreach (var key in toRemove)
+            _activeAudioNotes.Remove(key);
+    }
+
+    /// <summary>Get merged notes, reusing the pre-allocated list.</summary>
+    private IReadOnlyList<MidiNote> GetMergedNotes()
     {
         if (_midiData == null) return _liveNotes;
         if (_liveNotes.Count == 0) return _midiData.Notes;
 
-        var merged = new List<MidiNote>(_midiData.Notes);
-        merged.AddRange(_liveNotes);
-        merged.Sort((a, b) => a.OnTime.CompareTo(b.OnTime));
-        return merged;
+        if (_mergedDirty)
+        {
+            _mergedNotes.Clear();
+            _mergedNotes.AddRange(_midiData.Notes);
+            _mergedNotes.AddRange(_liveNotes);
+            _mergedNotes.Sort((a, b) => a.OnTime.CompareTo(b.OnTime));
+            _mergedDirty = false;
+        }
+        else
+        {
+            // Just append new live notes and re-sort if needed
+            // For simplicity, rebuild when live notes change
+            _mergedNotes.Clear();
+            _mergedNotes.AddRange(_midiData.Notes);
+            _mergedNotes.AddRange(_liveNotes);
+            _mergedNotes.Sort((a, b) => a.OnTime.CompareTo(b.OnTime));
+        }
+
+        return _mergedNotes;
+    }
+
+    /// <summary>Update key active states - optimized to avoid per-note branch.</summary>
+    private void UpdateKeyStates(IReadOnlyList<MidiNote> allNotes)
+    {
+        Array.Clear(_keyActive);
+        int count = allNotes.Count;
+        for (int i = 0; i < count; i++)
+        {
+            var note = allNotes[i];
+            if (note.OnTime <= _currentTime && note.OffTime > _currentTime)
+            {
+                int idx = note.Note - PianoFlowVisual.FirstNote;
+                if ((uint)idx < PianoFlowVisual.NoteCount)
+                    _keyActive[idx] = true;
+            }
+        }
+    }
+
+    private void ExportFrame()
+    {
+        // Reuse the same RenderTargetBitmap across frames
+        if (_exportRtb == null || _exportRtb.PixelWidth != _width || _exportRtb.PixelHeight != _height)
+        {
+            _exportRtb?.Freeze(); // freeze old one
+            _exportRtb = new RenderTargetBitmap(_width, _height, 96, 96, PixelFormats.Pbgra32);
+        }
+
+        _exportRtb.Render(_pianoVisual);
+        _exporter.WriteFrame(_exportRtb);
+        _exportFrame++;
+
+        if (_exportFrame >= _exportTotalFrames)
+        {
+            _exporter.FinishExport(_exportTotalFrames);
+            _exportRtb = null;
+            IsExporting = false;
+            StatusText = "Export complete!";
+        }
     }
 
     // --- Live MIDI Input ---
@@ -319,18 +451,20 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             Note = note,
             Velocity = velocity,
             Channel = channel,
-            OnTime = CurrentTime,
-            OffTime = CurrentTime + 0.5,
+            OnTime = _currentTime,
+            OffTime = _currentTime + 0.5,
             IsLive = true,
         };
         _liveNotes.Add(midiNote);
+        _mergedDirty = true;
 
         int idx = note - PianoFlowVisual.FirstNote;
-        if (idx >= 0 && idx < _keyActive.Length)
-        {
+        if ((uint)idx < PianoFlowVisual.NoteCount)
             _keyActive[idx] = true;
-            _keyFadeTime[idx] = CurrentTime;
-        }
+
+        // Play sound through synth
+        if (_audio.IsReady)
+            _audio.NoteOn(channel, note, velocity);
 
         // Record hit for flash effect
         _pianoVisual.RecordHit(note);
@@ -348,15 +482,20 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             if (_liveNotes[i].Note == note && _liveNotes[i].Channel == channel && _liveNotes[i].IsLive)
             {
                 var n = _liveNotes[i];
-                n.OffTime = CurrentTime;
+                n.OffTime = _currentTime;
                 _liveNotes[i] = n;
                 break;
             }
         }
+        _mergedDirty = true;
 
         int idx = note - PianoFlowVisual.FirstNote;
-        if (idx >= 0 && idx < _keyActive.Length)
+        if ((uint)idx < PianoFlowVisual.NoteCount)
             _keyActive[idx] = false;
+
+        // Stop sound
+        if (_audio.IsReady)
+            _audio.NoteOff(channel, note);
     }
 
     // --- Video Export ---
@@ -387,6 +526,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     public void CancelExport()
     {
         _exporter.Cancel();
+        _exportRtb = null;
         IsExporting = false;
         StatusText = "Export cancelled";
     }
@@ -395,6 +535,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         _midiDevice.Dispose();
         _exporter.Dispose();
+        _audio.Dispose();
     }
 
     private static string FormatTime(double seconds)
