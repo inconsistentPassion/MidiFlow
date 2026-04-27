@@ -33,7 +33,7 @@
                     Drop a .sf2 SoundFont for audio.
                 </TextBlock>
                 <TextBlock Foreground="#555" FontSize="12" HorizontalAlignment="Center" Margin="0,16,0,0">
-                    F1 — Toggle controls &nbsp; S — Load SoundFont
+                    F1 — Toggle controls &#x2003; S — Load SoundFont
                 </TextBlock>
             </StackPanel>
         </Border>
