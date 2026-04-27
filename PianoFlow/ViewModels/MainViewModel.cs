@@ -134,6 +134,16 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         set { _pianoHeight = value; OnPropertyChanged(nameof(PianoHeight)); }
     }
 
+    public int PianoHeightPercent
+    {
+        get => _height > 0 ? (int)(_pianoHeight * 100.0 / _height) : 11;
+        set
+        {
+            PianoHeight = (int)(_height * value / 100.0);
+            OnPropertyChanged(nameof(PianoHeightPercent));
+        }
+    }
+
     // --- Constructor ---
     public MainViewModel()
     {

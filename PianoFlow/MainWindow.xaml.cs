@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     private Storyboard? _settingsOut;
     private bool _uiVisible;
     private bool _settingsVisible;
+    private bool _layoutReady;
 
     public MainWindow()
     {
@@ -28,18 +29,17 @@ public partial class MainWindow : Window
         _vm.RenderFrameReady += OnRenderFrameReady;
         _vm.ShowMessage += msg => MessageBox.Show(msg, "PianoFlow", MessageBoxButton.OK, MessageBoxImage.Warning);
 
-        // Render timer — always runs
         _renderTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(1000.0 / 60)
         };
-        _renderTimer.Tick += (s, e) => _vm.UpdateFrame();
-
-        SetupAnimations();
+        _renderTimer.Tick += OnRenderTick;
     }
 
     private void SetupAnimations()
     {
+        if (StatusBar == null || SettingsPanel == null) return;
+
         _fadeIn = new Storyboard();
         var fi = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200));
         Storyboard.SetTarget(fi, StatusBar);
@@ -65,17 +65,31 @@ public partial class MainWindow : Window
         _settingsOut.Children.Add(so);
     }
 
+    private void OnRenderTick(object? sender, EventArgs e)
+    {
+        if (!_layoutReady) return;
+        try
+        {
+            _vm.UpdateFrame();
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Render error: {ex.Message}");
+        }
+    }
+
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        SetupAnimations();
         RefreshRendererLayout();
+        _layoutReady = true;
 
-        // Start rendering immediately
+        // Start rendering
         _renderTimer.Start();
 
         // Populate MIDI devices
         RefreshMidiDevices();
 
-        // Status bar starts hidden, user toggles with F1
         _uiVisible = false;
     }
 
@@ -87,12 +101,18 @@ public partial class MainWindow : Window
 
         _vm.Width = w;
         _vm.Height = h;
+
+        int pianoH = (int)(h * _vm.PianoHeightPercent / 100.0);
+        if (pianoH < 20) pianoH = (int)(h * 0.11);
+        _vm.PianoHeight = pianoH;
+
         _vm.NoteRenderer.UpdateLayout(w, h, _vm.PianoHeight);
         RenderImage.Source = _vm.NoteRenderer.Bitmap;
     }
 
     private void OnRenderFrameReady()
     {
+        if (_vm.Bitmap == null) return;
         RenderImage.Source = _vm.Bitmap;
 
         PlayStateText.Text = _vm.IsPlaying
@@ -102,7 +122,6 @@ public partial class MainWindow : Window
         MidiDeviceText.Text = _vm.MidiDeviceName != null ? $"🎹 {_vm.MidiDeviceName}" : "";
         StatusText.Text = _vm.StatusText ?? "";
 
-        // Hide welcome overlay when a file is loaded
         WelcomeOverlay.Visibility = _vm.FilePath != null ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -119,9 +138,8 @@ public partial class MainWindow : Window
         else
         {
             _fadeOut?.Begin();
-            // Collapse after animation
             var d = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-            d.Tick += (s, e) =>
+            d.Tick += (s, ev) =>
             {
                 if (!_uiVisible) StatusBar.Visibility = Visibility.Collapsed;
                 d.Stop();
@@ -130,7 +148,6 @@ public partial class MainWindow : Window
         }
     }
 
-    // --- Settings panel ---
     private void ToggleSettings()
     {
         _settingsVisible = !_settingsVisible;
@@ -144,7 +161,7 @@ public partial class MainWindow : Window
         {
             _settingsOut?.Begin();
             var d = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
-            d.Tick += (s, e) =>
+            d.Tick += (s, ev) =>
             {
                 if (!_settingsVisible) SettingsPanel.Visibility = Visibility.Collapsed;
                 d.Stop();
@@ -225,7 +242,6 @@ public partial class MainWindow : Window
         }
     }
 
-    // --- File Open ---
     private void OnOpenFile()
     {
         var dlg = new OpenFileDialog
@@ -235,9 +251,7 @@ public partial class MainWindow : Window
         };
 
         if (dlg.ShowDialog() == true)
-        {
             LoadMidiFile(dlg.FileName);
-        }
     }
 
     private void LoadMidiFile(string path)
@@ -282,22 +296,21 @@ public partial class MainWindow : Window
 
     private void SpeedSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        if (_vm == null || SpeedLabel == null) return;
         _vm.NoteSpeed = e.NewValue;
         SpeedLabel.Text = $"{(int)_vm.NoteSpeed} px/s";
     }
 
     private void Direction_Changed(object sender, RoutedEventArgs e)
     {
-        if (DirFalling.IsChecked == true)
-            _vm.Falling = true;
-        else
-            _vm.Falling = false;
+        if (_vm == null) return;
+        _vm.Falling = DirFalling.IsChecked == true;
     }
 
     private void PianoHeightSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_vm == null) return;
-        _vm.PianoHeight = (int)(_vm.Height * e.NewValue / 100.0);
+        if (_vm == null || !_layoutReady) return;
+        _vm.PianoHeightPercent = (int)e.NewValue;
         PianoHeightLabel.Text = $"{(int)e.NewValue}%";
         RefreshRendererLayout();
     }
@@ -314,7 +327,6 @@ public partial class MainWindow : Window
         WindowState = WindowState.Normal;
     }
 
-    // --- Video Export ---
     private void OnExport()
     {
         var dlg = new SaveFileDialog
@@ -331,7 +343,6 @@ public partial class MainWindow : Window
         }
     }
 
-    // --- Cleanup ---
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _renderTimer.Stop();
