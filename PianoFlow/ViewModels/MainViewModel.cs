@@ -39,8 +39,8 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private List<MidiNote> _mergedNotes = new();
     private bool _mergedDirty = true;
 
-    // --- Audio sync state ---
-    private HashSet<(int ch, int note)> _activeAudioNotes = new();
+    // --- Audio sync state: tracks each playing note with its expected OffTime ---
+    private readonly List<(int ch, int note, double offTime)> _activeAudioNotes = new();
 
     // --- Export ---
     private bool _isExporting;
@@ -358,7 +358,8 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             if (note.OnTime >= windowStart && note.OnTime <= windowEnd)
             {
                 _audio.NoteOn(note.Channel, note.Note, note.Velocity);
-                _activeAudioNotes.Add((note.Channel, note.Note));
+                // Track each individual note instance with its own OffTime
+                _activeAudioNotes.Add((note.Channel, note.Note, note.OffTime));
 
                 // Visual effects for file playback notes
                 _pianoVisual.RecordHit(note.Note);
@@ -370,31 +371,15 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
-        // Turn off notes that have ended
-        if (_activeAudioNotes.Count > 0)
+        // Turn off notes whose individual OffTime has passed
+        for (int i = _activeAudioNotes.Count - 1; i >= 0; i--)
         {
-            var toRemove = new List<(int ch, int note)>();
-            foreach (var (ch, n) in _activeAudioNotes)
+            var (ch, n, offTime) = _activeAudioNotes[i];
+            if (currentTime >= offTime)
             {
-                // Check if this note's OffTime has passed
-                // Scan from the start position backward/forward to find matching note
-                bool shouldOff = false;
-                for (int i = Math.Max(0, lo - 100); i < Math.Min(count, lo + 200); i++)
-                {
-                    if (notes[i].Channel == ch && notes[i].Note == n && notes[i].OffTime <= currentTime)
-                    {
-                        shouldOff = true;
-                        break;
-                    }
-                }
-                if (shouldOff)
-                {
-                    _audio.NoteOff(ch, n);
-                    toRemove.Add((ch, n));
-                }
+                _audio.NoteOff(ch, n);
+                _activeAudioNotes.RemoveAt(i);
             }
-            foreach (var key in toRemove)
-                _activeAudioNotes.Remove(key);
         }
 
         // --- Process other MIDI events (CC, Program Change, etc.) ---

@@ -14,7 +14,8 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="MeltySynth" Version="2.4.0" />
+    <PackageReference Include="Robust.Natives.Fluidsynth" Version="0.2.1-fluidsynth2.4.6" />
+    <PackageReference Include="SpaceWizards.NFluidsynth" Version="0.2.2" />
   </ItemGroup>
 
 </Project>
