@@ -16,7 +16,7 @@ public sealed class AudioEngine : IDisposable
 
     private string? _soundFontPath;
     private int _sampleRate = 44100;
-    private float _volume = 0.7f;
+    private float _volume = 1.0f;
 
     public bool IsReady => _synth != null && _waveOut != null;
     public string? SoundFontPath => _soundFontPath;
@@ -114,6 +114,7 @@ internal sealed class SynthWaveProvider : IWaveProvider
     private readonly int _bufferSamples;
     private readonly float[] _left;
     private readonly float[] _right;
+    private const float Gain = 2.0f;  // boost MeltySynth output
 
     public SynthWaveProvider(Synthesizer synth, int sampleRate)
     {
@@ -134,13 +135,15 @@ internal sealed class SynthWaveProvider : IWaveProvider
         // Render to separate L/R buffers
         _synth.Render(_left, _right);
 
-        // Interleave into output buffer
+        // Interleave into output buffer with gain boost
         int writePos = offset;
         for (int i = 0; i < samplesToRender; i++)
         {
-            Buffer.BlockCopy(_left, i * sizeof(float), buffer, writePos, sizeof(float));
+            float l = Math.Clamp(_left[i] * Gain, -1f, 1f);
+            float r = Math.Clamp(_right[i] * Gain, -1f, 1f);
+            Buffer.BlockCopy(BitConverter.GetBytes(l), 0, buffer, writePos, sizeof(float));
             writePos += sizeof(float);
-            Buffer.BlockCopy(_right, i * sizeof(float), buffer, writePos, sizeof(float));
+            Buffer.BlockCopy(BitConverter.GetBytes(r), 0, buffer, writePos, sizeof(float));
             writePos += sizeof(float);
         }
 

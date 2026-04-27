@@ -107,11 +107,19 @@ public partial class MainWindow : Window
     /// </summary>
     private void TryAutoLoadSoundFont()
     {
+        string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
         string[] searchPaths = new[]
         {
+            // App directory (portable install)
             AppDomain.CurrentDomain.BaseDirectory,
+            // Common user folders
+            Path.Combine(userProfile, "Downloads"),
             Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
             Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            // App data
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PianoFlow"),
         };
 
         string[] commonNames = new[]
@@ -320,7 +328,7 @@ public partial class MainWindow : Window
     {
         _muted = !_muted;
         _vm.Audio.Volume = _muted ? 0f : 0.7f;
-        VolumeSlider.Value = _muted ? 0 : 70;
+        VolumeSlider.Value = _muted ? 0 : 100;
     }
 
     private void LoadMidiFile(string path)

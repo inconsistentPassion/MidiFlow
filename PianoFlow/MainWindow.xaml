@@ -121,7 +121,7 @@
                     <Separator Background="#222" Margin="0,4,0,12"/>
 
                     <TextBlock Text="🔊 Volume" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>
-                    <Slider x:Name="VolumeSlider" Minimum="0" Maximum="100" Value="70"
+                    <Slider x:Name="VolumeSlider" Minimum="0" Maximum="100" Value="100"
                             ValueChanged="VolumeSlider_Changed"/>
                     <Separator Background="#222" Margin="0,4,0,12"/>
 
