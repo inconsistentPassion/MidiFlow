@@ -129,7 +129,6 @@ public class PianoFlowVisual : FrameworkElement
         if (idx >= 0 && idx < NoteCount)
         {
             _hitTime[idx] = 0; // will be set to currentTime on next render
-            _hitCount++;
         }
     }
 

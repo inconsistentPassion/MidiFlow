@@ -69,24 +69,24 @@ public sealed class AudioEngine : IDisposable
         _synth?.NoteOff(channel, note);
     }
 
-    /// <summary>Turn off all notes on all channels.</summary>
+    /// <summary>Turn off all notes on all channels (CC 123).</summary>
     public void AllNotesOff()
     {
         if (_synth == null) return;
         for (int ch = 0; ch < 16; ch++)
-            _synth.AllNotesOff(ch);
+            _synth.ProcessMidiMessage(ch, 0xB0, 123, 0);
     }
 
     /// <summary>Send a program change (instrument) on a channel.</summary>
     public void ProgramChange(int channel, int program)
     {
-        _synth?.ProgramChange(channel, program);
+        _synth?.ProcessMidiMessage(channel, 0xC0, program, 0);
     }
 
     /// <summary>Send a control change (e.g. sustain pedal, volume).</summary>
     public void ControlChange(int channel, int controller, int value)
     {
-        _synth?.ControlChange(channel, controller, value);
+        _synth?.ProcessMidiMessage(channel, 0xB0, controller, value);
     }
 
     public void Dispose()
@@ -105,23 +105,23 @@ public sealed class AudioEngine : IDisposable
 
 /// <summary>
 /// NAudio IWaveProvider that pulls audio samples from a MeltySynth Synthesizer.
-/// Runs on a background thread, calling synth.RenderInterleaved() each buffer.
+/// MeltySynth renders to separate L/R buffers; we interleave for NAudio's IEEE float format.
 /// </summary>
 internal sealed class SynthWaveProvider : IWaveProvider
 {
     private readonly Synthesizer _synth;
     private readonly WaveFormat _waveFormat;
     private readonly int _bufferSamples;
-    private readonly float[] _renderBuffer;  // reused every Read call
-    private readonly byte[] _byteBuffer;
+    private readonly float[] _left;
+    private readonly float[] _right;
 
     public SynthWaveProvider(Synthesizer synth, int sampleRate)
     {
         _synth = synth;
         _waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 2);
         _bufferSamples = sampleRate / 60;  // ~16ms chunks
-        _renderBuffer = new float[_bufferSamples * 2];  // stereo
-        _byteBuffer = new byte[_bufferSamples * 2 * sizeof(float)];
+        _left = new float[_bufferSamples];
+        _right = new float[_bufferSamples];
     }
 
     public WaveFormat WaveFormat => _waveFormat;
@@ -131,16 +131,23 @@ internal sealed class SynthWaveProvider : IWaveProvider
         int samplesNeeded = count / (sizeof(float) * 2);  // stereo float
         int samplesToRender = Math.Min(samplesNeeded, _bufferSamples);
 
-        // Render directly into reusable buffer
-        _synth.RenderInterleaved(_renderBuffer);
+        // Render to separate L/R buffers
+        _synth.Render(_left, _right);
 
-        // Copy to output
-        int bytesToCopy = samplesToRender * sizeof(float) * 2;
-        Buffer.BlockCopy(_renderBuffer, 0, buffer, offset, bytesToCopy);
+        // Interleave into output buffer
+        int writePos = offset;
+        for (int i = 0; i < samplesToRender; i++)
+        {
+            Buffer.BlockCopy(_left, i * sizeof(float), buffer, writePos, sizeof(float));
+            writePos += sizeof(float);
+            Buffer.BlockCopy(_right, i * sizeof(float), buffer, writePos, sizeof(float));
+            writePos += sizeof(float);
+        }
 
         // Zero-fill if we rendered fewer samples than requested
-        if (bytesToCopy < count)
-            Array.Clear(buffer, offset + bytesToCopy, count - bytesToCopy);
+        int bytesWritten = writePos - offset;
+        if (bytesWritten < count)
+            Array.Clear(buffer, offset + bytesWritten, count - bytesWritten);
 
         return count;
     }
