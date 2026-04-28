@@ -11,11 +11,13 @@ public class ParticleSystem
 {
     private readonly List<Particle> _particles = new();
     private readonly Random _random = new();
+    private readonly Dictionary<int, SolidColorBrush> _brushCache = new(128);
 
-    public int MaxParticles { get; set; } = 800;
-    public int ParticlesPerBurst { get; set; } = 20;  // more particles per hit
+    public int MaxParticles { get; set; } = 2000; // Increased for continuous streams
+    public int ParticlesPerBurst { get; set; } = 20;
     public double ParticleLifetime { get; set; } = 1.0;
     public double Gravity { get; set; } = 300;
+    public bool EmberMode { get; set; } = false;
 
     public struct Particle
     {
@@ -25,7 +27,8 @@ public class ParticleSystem
         public double MaxLife;
         public Color Color;
         public double Size;
-        public bool IsGlow;  // glow particles are larger and more transparent
+        public bool IsGlow;
+        public double HorizontalSway; // for ember drift
     }
 
     public void Emit(double x, double y, Color color)
@@ -34,38 +37,65 @@ public class ParticleSystem
 
         for (int i = 0; i < count; i++)
         {
-            // Mix of upward spray and radial burst
             double angle, speed;
-            bool isGlow = _random.NextDouble() < 0.3;  // 30% glow particles
+            bool isGlow = _random.NextDouble() < 0.4;
 
             if (isGlow)
             {
-                // Glow particles: mostly upward, slow
-                angle = -Math.PI / 2 + (_random.NextDouble() - 0.5) * Math.PI * 0.5;
-                speed = 30 + _random.NextDouble() * 80;
+                angle = -Math.PI / 2 + (_random.NextDouble() - 0.5) * Math.PI * 0.6;
+                speed = 40 + _random.NextDouble() * 100;
             }
             else
             {
-                // Regular particles: radial burst with upward bias
-                angle = -Math.PI / 2 + (_random.NextDouble() - 0.5) * Math.PI * 1.4;
-                speed = 60 + _random.NextDouble() * 250;
+                angle = -Math.PI / 2 + (_random.NextDouble() - 0.5) * Math.PI * 1.2;
+                speed = 80 + _random.NextDouble() * 220;
             }
 
             double size = isGlow
-                ? 4 + _random.Next(6)   // glow: 4-9 px
-                : 1.5 + _random.Next(3); // regular: 1.5-4 px
+                ? 3 + _random.Next(5)   // glow: 3-8 px
+                : 1.0 + _random.Next(3); // regular: 1-4 px
 
             _particles.Add(new Particle
             {
-                X = x + (_random.NextDouble() - 0.5) * 8,
+                X = x + (_random.NextDouble() - 0.5) * 6,
                 Y = y,
                 VX = Math.Cos(angle) * speed,
                 VY = Math.Sin(angle) * speed,
-                Life = ParticleLifetime * (0.4 + _random.NextDouble() * 0.6),
+                Life = ParticleLifetime * (0.5 + _random.NextDouble() * 0.7),
                 MaxLife = ParticleLifetime,
                 Color = color,
                 Size = size,
-                IsGlow = isGlow
+                IsGlow = isGlow,
+                HorizontalSway = (_random.NextDouble() - 0.5) * 2.0
+            });
+        }
+    }
+
+    /// <summary>Emit a steady stream of embers for held keys.</summary>
+    public void EmitContinuous(double x, double y, Color color)
+    {
+        if (_particles.Count >= MaxParticles) return;
+
+        // Emit 1-2 particles per call (frame)
+        int count = _random.Next(1, 3);
+        for (int i = 0; i < count; i++)
+        {
+            bool isGlow = _random.NextDouble() < 0.3;
+            double angle = -Math.PI / 2 + (_random.NextDouble() - 0.5) * 0.4; // tighter upward cone
+            double speed = 50 + _random.NextDouble() * 120;
+
+            _particles.Add(new Particle
+            {
+                X = x + (_random.NextDouble() - 0.5) * 12,
+                Y = y + (_random.NextDouble() - 0.5) * 4,
+                VX = Math.Cos(angle) * speed,
+                VY = Math.Sin(angle) * speed,
+                Life = (EmberMode ? 2.5 : 1.0) * (0.6 + _random.NextDouble() * 0.6),
+                MaxLife = EmberMode ? 2.5 : 1.0,
+                Color = color,
+                Size = isGlow ? 2 + _random.Next(4) : 1 + _random.Next(2),
+                IsGlow = isGlow,
+                HorizontalSway = (_random.NextDouble() - 0.5) * 3.5
             });
         }
     }
@@ -73,22 +103,22 @@ public class ParticleSystem
     /// <summary>Emit a burst of sparkles (small, fast, short-lived).</summary>
     public void EmitSparks(double x, double y, Color color)
     {
-        int count = Math.Min(8, MaxParticles - _particles.Count);
+        int count = Math.Min(12, MaxParticles - _particles.Count);
         for (int i = 0; i < count; i++)
         {
             double angle = _random.NextDouble() * Math.PI * 2;
-            double speed = 150 + _random.NextDouble() * 300;
+            double speed = 180 + _random.NextDouble() * 350;
 
             _particles.Add(new Particle
             {
                 X = x,
                 Y = y,
                 VX = Math.Cos(angle) * speed,
-                VY = Math.Sin(angle) * speed - 50,
-                Life = 0.2 + _random.NextDouble() * 0.3,
-                MaxLife = 0.5,
+                VY = Math.Sin(angle) * speed - 60,
+                Life = 0.2 + _random.NextDouble() * 0.4,
+                MaxLife = 0.6,
                 Color = color,
-                Size = 1 + _random.NextDouble(),
+                Size = 1 + _random.NextDouble() * 1.5,
                 IsGlow = false
             });
         }
@@ -96,26 +126,37 @@ public class ParticleSystem
 
     public void Update(double dt)
     {
+        double gravity = EmberMode ? -180 : Gravity; // float up in ember mode
+        double time = DateTime.Now.TimeOfDay.TotalSeconds;
+
         for (int i = _particles.Count - 1; i >= 0; i--)
         {
             var p = _particles[i];
+            
+            // Add horizontal drift/sway
+            p.VX += Math.Sin(time * 3 + p.Y * 0.01) * p.HorizontalSway * 10 * dt;
+            
             p.X += p.VX * dt;
             p.Y += p.VY * dt;
-            p.VY += Gravity * dt;
+            p.VY += gravity * dt;
 
-            // Air resistance for glow particles (they float more)
-            if (p.IsGlow)
-            {
-                p.VX *= 0.98;
-                p.VY *= 0.98;
-            }
+            // Air resistance
+            double drag = p.IsGlow ? 0.97 : 0.99;
+            p.VX *= drag;
+            p.VY *= drag;
 
             p.Life -= dt;
 
             if (p.Life <= 0)
-                _particles.RemoveAt(i);
+            {
+                int lastIdx = _particles.Count - 1;
+                _particles[i] = _particles[lastIdx];
+                _particles.RemoveAt(lastIdx);
+            }
             else
+            {
                 _particles[i] = p;
+            }
         }
     }
 
@@ -128,8 +169,6 @@ public class ParticleSystem
         Span<byte> alphaBuckets = stackalloc byte[alphaLevels];
         for (int i = 0; i < alphaLevels; i++)
             alphaBuckets[i] = (byte)(i * 255 / (alphaLevels - 1));
-
-        var brushCache = new Dictionary<int, SolidColorBrush>(128);
 
         foreach (var p in _particles)
         {
@@ -145,11 +184,11 @@ public class ParticleSystem
 
             int key = (p.Color.R << 24) | (p.Color.G << 16) | (p.Color.B << 8) | bucket;
 
-            if (!brushCache.TryGetValue(key, out var brush))
+            if (!_brushCache.TryGetValue(key, out var brush))
             {
                 brush = new SolidColorBrush(Color.FromArgb(alpha, p.Color.R, p.Color.G, p.Color.B));
                 brush.Freeze();
-                brushCache[key] = brush;
+                _brushCache[key] = brush;
             }
 
             double sz = p.Size;

@@ -5,6 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using System.Windows.Controls;
 using PianoFlow.Rendering;
 using PianoFlow.ViewModels;
 
@@ -186,7 +187,8 @@ public partial class MainWindow : Window
 
     private void OnRenderFrameReady()
     {
-        WelcomeOverlay.Visibility = _vm.FilePath != null ? Visibility.Collapsed : Visibility.Visible;
+        WelcomeOverlay.Visibility = (_vm.FilePath != null || _vm.MidiDeviceName != null || _vm.IsPlaying) 
+            ? Visibility.Collapsed : Visibility.Visible;
 
         PlayStateText.Text = _vm.IsPlaying
             ? (_vm.IsPaused ? "⏸ Paused" : "▶ Playing")
@@ -259,8 +261,6 @@ public partial class MainWindow : Window
                 break;
             case Key.F:
                 _vm.FlipDirection();
-                DirFalling.IsChecked = _vm.Falling;
-                DirRising.IsChecked = !_vm.Falling;
                 e.Handled = true;
                 break;
             case Key.Up:
@@ -394,10 +394,15 @@ public partial class MainWindow : Window
         _muted = e.NewValue <= 0;
     }
 
-    private void Direction_Changed(object sender, RoutedEventArgs e)
+    private void AccentColor_Click(object sender, RoutedEventArgs e)
     {
-        if (_vm == null) return;
-        _vm.Falling = DirFalling.IsChecked == true;
+        if (sender is Button btn && btn.Tag is string colorHex)
+        {
+            try {
+                var color = (Color)ColorConverter.ConvertFromString(colorHex);
+                _vm.AccentColor = color;
+            } catch { }
+        }
     }
 
     private void PianoHeightSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)

@@ -125,16 +125,24 @@
                             ValueChanged="VolumeSlider_Changed"/>
                     <Separator Background="#222" Margin="0,4,0,12"/>
 
-                    <TextBlock Text="Note Direction" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>
-                    <StackPanel Orientation="Horizontal">
-                        <RadioButton x:Name="DirFalling" Content="↓ Falling" Foreground="#AAA"
-                                     IsChecked="True" GroupName="Direction"
-                                     Checked="Direction_Changed" Margin="0,0,16,0"/>
-                        <RadioButton x:Name="DirRising" Content="↑ Rising" Foreground="#AAA"
-                                     GroupName="Direction"
-                                     Checked="Direction_Changed"/>
+                    <TextBlock Text="Visualization Mode" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <RadioButton Content="Waterfall" Foreground="#AAA" IsChecked="{Binding WaterfallMode}" Margin="0,0,16,0"/>
+                        <RadioButton Content="Rising" Foreground="#AAA" IsChecked="{Binding RisingMode}"/>
                     </StackPanel>
-                    <Separator Background="#222" Margin="0,12,0,12"/>
+                    <Separator Background="#222" Margin="0,4,0,12"/>
+
+                    <TextBlock Text="Accent Color" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                        <Button Background="#FF7043" Width="24" Height="24" Margin="0,0,8,0" BorderThickness="0" Click="AccentColor_Click" Tag="#FF7043"/>
+                        <Button Background="#4FC3F7" Width="24" Height="24" Margin="0,0,8,0" BorderThickness="0" Click="AccentColor_Click" Tag="#4FC3F7"/>
+                        <Button Background="#66BB6A" Width="24" Height="24" Margin="0,0,8,0" BorderThickness="0" Click="AccentColor_Click" Tag="#66BB6A"/>
+                        <Button Background="#FFCA28" Width="24" Height="24" Margin="0,0,8,0" BorderThickness="0" Click="AccentColor_Click" Tag="#FFCA28"/>
+                        <Button Background="#AB47BC" Width="24" Height="24" Margin="0,0,8,0" BorderThickness="0" Click="AccentColor_Click" Tag="#AB47BC"/>
+                        <Button Background="#EF5350" Width="24" Height="24" Margin="0,0,8,0" BorderThickness="0" Click="AccentColor_Click" Tag="#EF5350"/>
+                    </StackPanel>
+                    <CheckBox Content="Use for all notes" Foreground="#888" FontSize="11" IsChecked="{Binding UseGlobalAccentColor}" Margin="0,0,0,8"/>
+                    <Separator Background="#222" Margin="0,4,0,12"/>
 
                     <TextBlock Text="Piano Height %" Foreground="#AAA" FontSize="12" Margin="0,0,0,4"/>
                     <Slider x:Name="PianoHeightSlider" Minimum="5" Maximum="25" Value="11"

@@ -25,8 +25,10 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     private double _currentTime;
     private bool _isPlaying;
     private bool _isPaused;
-    private double _noteSpeed = 300;
     private bool _falling = true;
+    private double _noteSpeed = 300;
+    private Color _accentColor = Color.FromRgb(255, 170, 0); // Default amber ember
+    private bool _useGlobalAccentColor = false;
 
     // --- Piano state ---
     private bool[] _keyActive = new bool[PianoFlowVisual.NoteCount];
@@ -86,7 +88,31 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     public bool Falling
     {
         get => _falling;
-        set { _falling = value; OnPropertyChanged(nameof(Falling)); }
+        set { _falling = value; OnPropertyChanged(nameof(Falling)); OnPropertyChanged(nameof(WaterfallMode)); }
+    }
+
+    public bool WaterfallMode
+    {
+        get => _falling;
+        set { Falling = value; }
+    }
+
+    public bool RisingMode
+    {
+        get => !_falling;
+        set { Falling = !value; }
+    }
+
+    public Color AccentColor
+    {
+        get => _accentColor;
+        set { _accentColor = value; OnPropertyChanged(nameof(AccentColor)); }
+    }
+
+    public bool UseGlobalAccentColor
+    {
+        get => _useGlobalAccentColor;
+        set { _useGlobalAccentColor = value; OnPropertyChanged(nameof(UseGlobalAccentColor)); }
     }
 
     public double NoteSpeed
@@ -214,7 +240,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
     // --- Playback Control ---
     public void Play()
     {
-        if (_midiData == null) return;
+        if (_midiData == null && !_midiDevice.IsConnected) return;
         _playbackStartTime = DateTime.Now - TimeSpan.FromSeconds(_currentTime);
         IsPlaying = true;
         IsPaused = false;
@@ -264,6 +290,10 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             _midiDevice.Open(index);
             MidiDeviceName = _midiDevice.DeviceName;
             StatusText = $"Connected: {MidiDeviceName}";
+
+            // Enter Ember Mode automatically
+            Falling = false;
+            _particles.EmberMode = true;
         }
         catch (Exception ex)
         {
@@ -276,12 +306,14 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         _midiDevice.Close();
         MidiDeviceName = null;
         StatusText = "MIDI disconnected";
+        _particles.EmberMode = false;
     }
 
     // --- Frame Update ---
     public void UpdateFrame()
     {
-        if (_midiData == null && _liveNotes.Count == 0) return;
+        // Allow frame updates if we have a file OR if a device is connected OR if live notes are being rendered
+        if (_midiData == null && !_midiDevice.IsConnected && _liveNotes.Count == 0) return;
 
         double prevTime = _currentTime;
 
@@ -315,8 +347,23 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
         // Update particles
         _particles.Update(1.0 / _fps);
 
+        // Continuous ember emission for active live notes
+        if (_midiDevice.IsConnected)
+        {
+            for (int i = 0; i < allNotes.Count; i++)
+            {
+                var note = allNotes[i];
+                if (note.IsLive && note.OnTime <= _currentTime && note.OffTime > _currentTime)
+                {
+                    double x = _pianoVisual.GetKeyCenterX(note.Note);
+                    var color = PianoFlowVisual.ChannelColors[note.Channel % 16];
+                    _particles.EmitContinuous(x, _pianoVisual.PianoTopY, color);
+                }
+            }
+        }
+
         // Render via WPF DrawingVisual (GPU accelerated)
-        _pianoVisual.Render(allNotes, _currentTime, Falling, _noteSpeed, _keyActive, _particles);
+        _pianoVisual.Render(allNotes, _currentTime, Falling, _noteSpeed, _keyActive, _particles, AccentColor, UseGlobalAccentColor);
 
         RenderFrameReady?.Invoke();
 
@@ -362,7 +409,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
                 _activeAudioNotes.Add((note.Channel, note.Note, note.OffTime));
 
                 // Visual effects for file playback notes
-                _pianoVisual.RecordHit(note.Note);
+                _pianoVisual.RecordHit(note.Note, currentTime);
                 var color = PianoFlowVisual.ChannelColors[note.Channel % 16];
                 double keyX = _pianoVisual.GetKeyCenterX(note.Note);
                 _particles.Emit(keyX, _pianoVisual.PianoTopY, color);
@@ -422,15 +469,6 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             _mergedNotes.Sort((a, b) => a.OnTime.CompareTo(b.OnTime));
             _mergedDirty = false;
         }
-        else
-        {
-            // Just append new live notes and re-sort if needed
-            // For simplicity, rebuild when live notes change
-            _mergedNotes.Clear();
-            _mergedNotes.AddRange(_midiData.Notes);
-            _mergedNotes.AddRange(_liveNotes);
-            _mergedNotes.Sort((a, b) => a.OnTime.CompareTo(b.OnTime));
-        }
 
         return _mergedNotes;
     }
@@ -483,7 +521,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             Velocity = velocity,
             Channel = channel,
             OnTime = _currentTime,
-            OffTime = _currentTime + 0.5,
+            OffTime = _currentTime + 999.0, // Large future time so it grows while held
             IsLive = true,
         };
         _liveNotes.Add(midiNote);
@@ -498,7 +536,7 @@ public class MainViewModel : INotifyPropertyChanged, IDisposable
             _audio.NoteOn(channel, note, velocity);
 
         // Record hit for flash effect
-        _pianoVisual.RecordHit(note);
+        _pianoVisual.RecordHit(note, _currentTime);
 
         // Spawn particles (burst + sparks)
         var color = PianoFlowVisual.ChannelColors[channel % 16];

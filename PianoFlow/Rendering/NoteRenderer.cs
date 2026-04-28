@@ -44,6 +44,13 @@ public class PianoFlowVisual : FrameworkElement
     private static readonly SolidColorBrush[] HitFlashWhite;
     private static readonly SolidColorBrush[] HitFlashBlack;
 
+    // --- Dynamic accent brushes ---
+    private Color _lastAccentColor;
+    private readonly SolidColorBrush[] _accentNoteBrushes = new SolidColorBrush[AlphaBuckets];
+    private readonly SolidColorBrush[] _accentGlowBrushes = new SolidColorBrush[AlphaBuckets];
+    private readonly LinearGradientBrush[] _accentGradientBrushes = new LinearGradientBrush[AlphaBuckets];
+    private SolidColorBrush? _accentKeyBrush;
+
     // --- Background atmosphere ---
     private static readonly RadialGradientBrush AtmosphereBrush;
 
@@ -196,6 +203,56 @@ public class PianoFlowVisual : FrameworkElement
         return NoteGradientCache[channel % 16][bucket];
     }
 
+    private void UpdateAccentBrushes(Color color)
+    {
+        if (color == _lastAccentColor && _accentKeyBrush != null) return;
+        _lastAccentColor = color;
+
+        _accentKeyBrush = new SolidColorBrush(color);
+        _accentKeyBrush.Freeze();
+
+        for (int a = 0; a < AlphaBuckets; a++)
+        {
+            int alphaValue = (int)(a * 255.0 / (AlphaBuckets - 1));
+            alphaValue = Math.Max(80, alphaValue);
+
+            var brush = new SolidColorBrush(Color.FromArgb((byte)alphaValue, color.R, color.G, color.B));
+            brush.Freeze();
+            _accentNoteBrushes[a] = brush;
+
+            int glowAlpha = Math.Min(255, alphaValue * 40 / 100);
+            var glow = new SolidColorBrush(Color.FromArgb((byte)glowAlpha, color.R, color.G, color.B));
+            glow.Freeze();
+            _accentGlowBrushes[a] = glow;
+
+            var grad = new LinearGradientBrush();
+            grad.StartPoint = new Point(0, 1);
+            grad.EndPoint = new Point(0, 0);
+            grad.GradientStops.Add(new GradientStop(Color.FromArgb((byte)alphaValue, color.R, color.G, color.B), 0.0));
+            grad.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(alphaValue * 55 / 100), color.R, color.G, color.B), 1.0));
+            grad.Freeze();
+            _accentGradientBrushes[a] = grad;
+        }
+    }
+
+    private LinearGradientBrush GetAccentGradientBrush(double alpha01)
+    {
+        int bucket = (int)(Math.Clamp(alpha01, 0, 1) * (AlphaBuckets - 1) + 0.5);
+        return _accentGradientBrushes[bucket];
+    }
+
+    private SolidColorBrush GetAccentGlowBrush(double alpha01)
+    {
+        int bucket = (int)(Math.Clamp(alpha01, 0, 1) * (AlphaBuckets - 1) + 0.5);
+        return _accentGlowBrushes[bucket];
+    }
+
+    private SolidColorBrush GetAccentNoteBrush(double alpha01)
+    {
+        int bucket = (int)(Math.Clamp(alpha01, 0, 1) * (AlphaBuckets - 1) + 0.5);
+        return _accentNoteBrushes[bucket];
+    }
+
     // --- Precomputed key positions (O(1) lookup) ---
     private int[] _keyX = new int[NoteCount];
     private int[] _keyWidth = new int[NoteCount];
@@ -223,12 +280,12 @@ public class PianoFlowVisual : FrameworkElement
     protected override Visual GetVisualChild(int index) => index == 0 ? _glowVisual : _visual;
 
     /// <summary>Record a key hit for flash + impact effect.</summary>
-    public void RecordHit(int note)
+    public void RecordHit(int note, double currentTime)
     {
         int idx = note - FirstNote;
         if (idx >= 0 && idx < NoteCount)
         {
-            _hitTime[idx] = 0;
+            _hitTime[idx] = currentTime;
             _hasImpact[idx] = true;
         }
     }
@@ -291,8 +348,11 @@ public class PianoFlowVisual : FrameworkElement
 
     /// <summary>Main render call. Draws atmosphere + glow + notes + particles + piano + saber.</summary>
     public void Render(IReadOnlyList<Models.MidiNote> notes, double currentTime,
-        bool falling, double noteSpeed, bool[]? keyActive, ParticleSystem? particles = null)
+        bool falling, double noteSpeed, bool[]? keyActive, ParticleSystem? particles = null,
+        Color? accentColor = null, bool useGlobalAccent = false)
     {
+        if (accentColor.HasValue) UpdateAccentBrushes(accentColor.Value);
+
         int w = (int)ActualWidth;
         int h = (int)ActualHeight;
         if (w <= 0 || h <= 0) return;
@@ -306,7 +366,7 @@ public class PianoFlowVisual : FrameworkElement
             dcGlow.DrawRectangle(AtmosphereBrush, null, new Rect(0, 0, w, h));
 
             // Draw glow copies of notes (larger, dimmer, blurred feel)
-            DrawNoteGlow(dcGlow, notes, currentTime, falling, noteSpeed, w, h);
+            DrawNoteGlow(dcGlow, notes, currentTime, falling, noteSpeed, w, h, useGlobalAccent);
         }
 
         // --- Main layer ---
@@ -316,7 +376,7 @@ public class PianoFlowVisual : FrameworkElement
         dc.DrawRectangle(BrushCache.Background, null, new Rect(0, 0, w, h));
 
         // Draw notes with gradient
-        DrawNotes(dc, notes, currentTime, falling, noteSpeed, w, h);
+        DrawNotes(dc, notes, currentTime, falling, noteSpeed, w, h, useGlobalAccent);
 
         // Draw impact flashes at piano line
         DrawImpactFlashes(dc, currentTime, w);
@@ -334,15 +394,11 @@ public class PianoFlowVisual : FrameworkElement
         dc.DrawRectangle(BrushCache.Separator, null, new Rect(0, _pianoY - 2, w, 2));
     }
 
-    /// <summary>
-    /// Draw glow/bloom copies of notes. Each note gets a slightly larger, semi-transparent
-    /// version drawn behind it to simulate bloom effect.
-    /// </summary>
     private void DrawNoteGlow(DrawingContext dc, IReadOnlyList<Models.MidiNote> notes,
-        double currentTime, bool falling, double noteSpeed, int w, int h)
+        double currentTime, bool falling, double noteSpeed, int w, int h, bool useGlobalAccent)
     {
         double visibleDuration = _pianoY / noteSpeed;
-        int glowExpand = 4; // pixels to expand glow on each side
+        int glowExpand = 4;
 
         for (int i = 0; i < notes.Count; i++)
         {
@@ -365,39 +421,41 @@ public class PianoFlowVisual : FrameworkElement
             int keyX = _keyX[noteIndex];
             int keyW = _keyWidth[noteIndex];
 
-            int yTop, yBottom;
+            int y1, y2;
+            double effectiveOffTime = (note.IsLive && note.OffTime > currentTime) ? currentTime : note.OffTime;
+
             if (falling)
             {
-                yTop = _pianoY - (int)((note.OffTime - currentTime) * noteSpeed);
-                yBottom = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
+                y1 = _pianoY - (int)((effectiveOffTime - currentTime) * noteSpeed);
+                y2 = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
             }
             else
             {
-                yTop = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
-                yBottom = _pianoY - (int)((note.OffTime - currentTime) * noteSpeed);
+                y1 = _pianoY - (int)((currentTime - note.OnTime) * noteSpeed);
+                y2 = _pianoY - (int)((currentTime - effectiveOffTime) * noteSpeed);
             }
 
-            yTop = Math.Max(0, yTop);
-            yBottom = Math.Min(_pianoY, yBottom);
+            int yTop = Math.Max(0, Math.Min(y1, y2));
+            int yBottom = Math.Min(_pianoY, Math.Max(y1, y2));
             if (yTop >= yBottom) continue;
 
-            double distFromHit = Math.Abs(
-                (falling ? note.OnTime : note.OffTime) - currentTime);
-            double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 100.0 / 255.0);
+            double distFromHit;
+            if (falling)
+                distFromHit = Math.Max(0, note.OnTime - currentTime);
+            else
+                distFromHit = Math.Max(0, currentTime - effectiveOffTime);
 
-            var glowBrush = GetCachedGlowBrush(note.Channel, alpha);
+            double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 0.6);
+
+            var glowBrush = useGlobalAccent ? GetAccentGlowBrush(alpha) : GetCachedGlowBrush(note.Channel, alpha);
             dc.DrawRectangle(glowBrush, null,
                 new Rect(keyX - glowExpand, yTop - glowExpand,
                          keyW + glowExpand * 2, (yBottom - yTop) + glowExpand * 2));
         }
     }
 
-    /// <summary>
-    /// Draw notes with vertical gradient (bright at hit edge, dimmer away from piano).
-    /// This is the MIDIVisualizer-style gradient effect.
-    /// </summary>
     private void DrawNotes(DrawingContext dc, IReadOnlyList<Models.MidiNote> notes,
-        double currentTime, bool falling, double noteSpeed, int w, int h)
+        double currentTime, bool falling, double noteSpeed, int w, int h, bool useGlobalAccent)
     {
         double visibleDuration = _pianoY / noteSpeed;
 
@@ -422,33 +480,41 @@ public class PianoFlowVisual : FrameworkElement
             int keyX = _keyX[noteIndex];
             int keyW = _keyWidth[noteIndex];
 
-            int yTop, yBottom;
+            int y1, y2;
+            double effectiveOffTime = (note.IsLive && note.OffTime > currentTime) ? currentTime : note.OffTime;
+
             if (falling)
             {
-                yTop = _pianoY - (int)((note.OffTime - currentTime) * noteSpeed);
-                yBottom = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
+                y1 = _pianoY - (int)((effectiveOffTime - currentTime) * noteSpeed);
+                y2 = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
             }
             else
             {
-                yTop = _pianoY - (int)((note.OnTime - currentTime) * noteSpeed);
-                yBottom = _pianoY - (int)((note.OffTime - currentTime) * noteSpeed);
+                y1 = _pianoY - (int)((currentTime - note.OnTime) * noteSpeed);
+                y2 = _pianoY - (int)((currentTime - effectiveOffTime) * noteSpeed);
             }
 
-            yTop = Math.Max(0, yTop);
-            yBottom = Math.Min(_pianoY, yBottom);
+            int yTop = Math.Max(0, Math.Min(y1, y2));
+            int yBottom = Math.Min(_pianoY, Math.Max(y1, y2));
             if (yTop >= yBottom) continue;
 
-            double distFromHit = Math.Abs(
-                (falling ? note.OnTime : note.OffTime) - currentTime);
-            double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 100.0 / 255.0);
+            double distFromHit;
+            if (falling)
+                distFromHit = Math.Max(0, note.OnTime - currentTime);
+            else
+                distFromHit = Math.Max(0, currentTime - effectiveOffTime);
+
+            double alpha = Math.Max(80.0 / 255.0, 1.0 - distFromHit * 0.6);
 
             // Use gradient brush: bright at piano edge, dimmer away
-            var gradientBrush = GetCachedGradientBrush(note.Channel, alpha);
+            var gradientBrush = useGlobalAccent ? GetAccentGradientBrush(alpha) : GetCachedGradientBrush(note.Channel, alpha);
+
+            // Draw full note rectangle
             dc.DrawRectangle(gradientBrush, null, new Rect(keyX, yTop, keyW, yBottom - yTop));
 
             // Bright accent line at the hit edge (where note meets piano)
-            int hitEdgeY = falling ? yBottom : yTop;
-            var accentBrush = GetCachedNoteBrush(note.Channel, 1.0);
+            int hitEdgeY = yBottom;
+            var accentBrush = useGlobalAccent ? GetAccentNoteBrush(1.0) : GetCachedNoteBrush(note.Channel, 1.0);
             dc.DrawRectangle(accentBrush, null, new Rect(keyX, hitEdgeY, keyW, 2));
         }
     }
@@ -548,7 +614,7 @@ public class PianoFlowVisual : FrameworkElement
             int x = _keyX[ni];
             bool active = keyActive != null && ni < keyActive.Length && keyActive[ni];
 
-            var fill = active ? BrushCache.WhiteKeyActive : BrushCache.WhiteKey;
+            var fill = active ? (_accentKeyBrush ?? BrushCache.WhiteKeyActive) : BrushCache.WhiteKey;
 
             dc.DrawRectangle(fill, null, new Rect(x, _pianoY, _whiteKeyWidth - _gap, _pianoHeight));
             dc.DrawRectangle(WhiteKeyTop, null, new Rect(x + 1, _pianoY + 1, _whiteKeyWidth - _gap - 2, 2));
@@ -579,7 +645,7 @@ public class PianoFlowVisual : FrameworkElement
             int kw = _blackKeyWidth;
             bool active = keyActive != null && ni < keyActive.Length && keyActive[ni];
 
-            var fill = active ? BrushCache.BlackKeyActive : BrushCache.BlackKey;
+            var fill = active ? (_accentKeyBrush ?? BrushCache.BlackKeyActive) : BrushCache.BlackKey;
 
             dc.DrawRectangle(fill, null, new Rect(x, _pianoY, kw, _blackKeyVisualHeight));
             dc.DrawRectangle(null, new Pen(PianoKeyBorder, 1),
